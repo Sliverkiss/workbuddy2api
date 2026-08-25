@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -61,8 +62,35 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
+// statusRecorder wraps ResponseWriter to capture the response status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// ServeHTTP wraps the router and logs one line per request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w}
+	h.mux.ServeHTTP(rec, r)
+	// /healthz 静默；/v1/chat/completions 由表格日志覆盖，避免重复。
+	if r.URL.Path == "/healthz" || r.URL.Path == "/v1/chat/completions" {
+		return
+	}
+	log.Printf("request method=%s path=%s status=%d duration=%s remote=%s",
+		r.Method, r.URL.Path, rec.status, time.Since(start), r.RemoteAddr)
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -106,8 +134,8 @@ var staticModels = []map[string]any{
 // dynamicModelsCache 动态模型缓存。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids     []upstream.ModelInfo
-	fetched time.Time // 最近一次成功拉取时间
+	ids      []upstream.ModelInfo
+	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
 
@@ -184,9 +212,13 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	chatStart := time.Now()
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
+		model := parseModelFromBody(body)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		logChatRow(0, time.Since(chatStart), model, "sync", http.StatusBadRequest, -1)
 		return
 	}
 	var peek struct {
@@ -253,15 +285,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rc.Close()
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		model := parseModelFromBody(body)
 		if peek.Stream {
-			_ = upstream.Stream(w, rc)
+			// TTFB 以请求进入 handler 的时刻为基准，反映真实的首 token 延迟。
+			stats := newChatStatsReaderSince(rc, chatStart)
+			_ = upstream.Stream(w, stats)
+			logChatRow(stats.TTFB(), time.Since(chatStart), model, "stream", http.StatusOK, stats.Tokens())
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			logChatRow(0, time.Since(chatStart), model, "sync", http.StatusBadGateway, -1)
 			return
 		}
+		toks := 0
+		if u, ok := resp["usage"].(map[string]any); ok {
+			if v, ok := u["completion_tokens"].(float64); ok {
+				toks = int(v)
+			}
+		}
+		if v, ok := resp["model"].(string); ok && v != "" {
+			model = v
+		}
+		logChatRow(0, time.Since(chatStart), model, "sync", http.StatusOK, toks)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -269,7 +316,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
+	model := parseModelFromBody(body)
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	logChatRow(0, time.Since(chatStart), model, "sync", http.StatusServiceUnavailable, -1)
 }
 
 // ---------------------------------------------------------------------------

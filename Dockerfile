@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
+ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download

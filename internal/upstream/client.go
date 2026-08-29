@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -111,6 +112,10 @@ type apiEnvelope struct {
 type Client struct {
 	HTTP *http.Client
 
+	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
+	effortsMu sync.RWMutex
+	efforts   map[string][]string
+
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
@@ -146,7 +151,21 @@ func (c *Client) chatBase(a *auth.Auth) string {
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 func (c *Client) prepareBody(body []byte) []byte {
-	return PrepareBodyOpt(body, c.SanitizeFingerprints)
+	return PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot())
+}
+
+// effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
+func (c *Client) effortsSnapshot() map[string][]string {
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	if len(c.efforts) == 0 {
+		return nil
+	}
+	cp := make(map[string][]string, len(c.efforts))
+	for k, v := range c.efforts {
+		cp[k] = v
+	}
+	return cp
 }
 
 func (c *Client) billingBase(a *auth.Auth) string {
@@ -253,8 +272,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 type ModelInfo struct {
 	ID            string
 	Name          string
-	ContextWindow int64 // = maxInputTokens
-	MaxTokens     int64 // = maxOutputTokens
+	ContextWindow int64    // = maxInputTokens
+	MaxTokens     int64    // = maxOutputTokens
+	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
 }
 
 // FetchModels 调上游动态模型接口。
@@ -289,6 +309,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 				MaxInputTokens  int64  `json:"maxInputTokens"`
 				MaxOutputTokens int64  `json:"maxOutputTokens"`
 				Disabled        bool   `json:"disabled"`
+				Reasoning       struct {
+					Effort           string   `json:"effort"`
+					SupportedEfforts []string `json:"supportedEfforts"`
+				} `json:"reasoning"`
 			} `json:"models"`
 			Agents []struct {
 				Name   string   `json:"name"`
@@ -318,6 +342,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		MaxInputTokens  int64
 		MaxOutputTokens int64
 		Disabled        bool
+		Efforts         []string
 	}, len(env.Data.Models))
 	for _, m := range env.Data.Models {
 		dynMap[m.ID] = struct {
@@ -326,7 +351,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			MaxInputTokens  int64
 			MaxOutputTokens int64
 			Disabled        bool
-		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled}
+			Efforts         []string
+		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled, m.Reasoning.SupportedEfforts}
 	}
 	out := make([]ModelInfo, 0, len(cliIDs))
 	for _, id := range cliIDs {
@@ -339,11 +365,22 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			Name:          m.Name,
 			ContextWindow: m.MaxInputTokens,
 			MaxTokens:     m.MaxOutputTokens,
+			Efforts:       m.Efforts,
 		})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
+	// 刷新 effort 能力缓存（供请求体降级）。
+	cache := make(map[string][]string, len(out))
+	for _, mi := range out {
+		if len(mi.Efforts) > 0 {
+			cache[mi.ID] = mi.Efforts
+		}
+	}
+	c.effortsMu.Lock()
+	c.efforts = cache
+	c.effortsMu.Unlock()
 	return out, nil
 }
 

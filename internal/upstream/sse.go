@@ -189,7 +189,12 @@ func sortInts(a []int) {
 	}
 }
 
-// Stream 透传上游 SSE 到 w（每行 flush），保证至少写一个 [DONE]。
+// 流式策略：逐帧透传（规范化后空 content 噪声已除，TUI 单 part 连续渲染，
+// 恢复与上游一致的平滑流式）。如 TUI 思考区再现一词一行，将下方 mustFlush
+// 策略改回按阈值合并即可（git 历史 sse.go.bak4-* 有完整实现）。
+
+// Stream 透传上游 SSE 到 w：可合并的 delta 帧按阈值批量合并后下发，其余帧
+// （finish/usage/tool_calls/[DONE] 等）先冲刷待批再原样透传，保证至少写一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 func Stream(w http.ResponseWriter, r io.Reader) error {
 	h := w.Header()
@@ -198,13 +203,252 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
+
+	var (
+		base       map[string]any // 批次首帧模板（保留 id/model/created/role 等元数据）
+		hasC, hasR bool
+		sbC, sbR   strings.Builder
+		sawDone    bool
+	)
+
+	// normalizeFrame 以 OpenAI 流式规范白名单重建帧：仅保留标准字段，
+	// 剔除上游噪声（finish_reason:"" → null、空 content/refusal、空 tool_calls 列表、
+	// null function_call/extra_fields、顶层未知字段），空 delta 键一律省略，
+	// 保证任意标准客户端按规范解析。
+	normalizeFrame := func(obj map[string]any) map[string]any {
+		out := map[string]any{}
+		for _, k := range []string{"id", "object", "created", "model", "system_fingerprint", "service_tier"} {
+			if v, ok := obj[k]; ok && v != nil {
+				out[k] = v
+			}
+		}
+		if _, ok := out["object"]; !ok {
+			out["object"] = "chat.completion.chunk"
+		}
+		if _, ok := out["id"]; !ok {
+			out["id"] = "chatcmpl-wb2api"
+		}
+		if chs, ok := obj["choices"].([]any); ok {
+			nchs := make([]any, 0, len(chs))
+			for _, ci := range chs {
+				c, ok := ci.(map[string]any)
+				if !ok {
+					continue
+				}
+				nc := map[string]any{}
+				if idx, ok := c["index"]; ok {
+					nc["index"] = idx
+				}
+				delta := map[string]any{}
+				if d, ok := c["delta"].(map[string]any); ok {
+					if v, ok := d["role"].(string); ok && v != "" {
+						delta["role"] = v
+					}
+					if v, ok := d["content"].(string); ok && v != "" {
+						delta["content"] = v
+					}
+					if v, ok := d["reasoning_content"].(string); ok && v != "" {
+						delta["reasoning_content"] = v
+					}
+					if v, ok := d["refusal"].(string); ok && v != "" {
+						delta["refusal"] = v
+					}
+					if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+						delta["tool_calls"] = tcs
+					}
+					if fc, ok := d["function_call"]; ok && fc != nil {
+						// 空占位 function_call（name/arguments 全空）视为噪声剔除
+						keep := false
+						if fcm, ok2 := fc.(map[string]any); ok2 {
+							n, _ := fcm["name"].(string)
+							a, _ := fcm["arguments"].(string)
+							keep = n != "" || a != ""
+						} else {
+							keep = true
+						}
+						if keep {
+							delta["function_call"] = fc
+						}
+					}
+				}
+				nc["delta"] = delta
+				if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+					nc["finish_reason"] = fr
+				} else {
+					nc["finish_reason"] = nil
+				}
+				nchs = append(nchs, nc)
+			}
+			out["choices"] = nchs
+		}
+		if u, ok := obj["usage"]; ok {
+			out["usage"] = u
+		} else {
+			out["usage"] = nil
+		}
+		return out
+	}
+
+	flush := func() error {
+		if base == nil {
+			return nil
+		}
+		if chs, ok := base["choices"].([]any); ok && len(chs) > 0 {
+			if ch0, ok := chs[0].(map[string]any); ok {
+				delta, _ := ch0["delta"].(map[string]any)
+				if delta == nil {
+					delta = map[string]any{}
+					ch0["delta"] = delta
+				}
+				// 空串字段直接删 key：纯 reasoning 帧不带 content:""，避免客户端
+				// 每帧因空 content 建多余 text part/边界（表现为频繁换行）。
+				if hasC {
+					if s := sbC.String(); s != "" {
+						delta["content"] = s
+					} else {
+						delete(delta, "content")
+					}
+				}
+				if hasR {
+					if s := sbR.String(); s != "" {
+						delta["reasoning_content"] = s
+					} else {
+						delete(delta, "reasoning_content")
+					}
+				}
+			}
+		}
+		raw, err := json.Marshal(normalizeFrame(base))
+		if err != nil {
+			return err
+		}
+		base, hasC, hasR = nil, false, false
+		sbC.Reset()
+		sbR.Reset()
+		if _, werr := io.WriteString(w, "data: "+string(raw)+"\n\n"); werr != nil {
+			return werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return nil
+	}
+
+	// mergeable 判断帧能否并入批次：仅含 content/reasoning_content 的普通 delta 帧，
+	// finish_reason/usage/tool_calls/function_call 帧一律透传。
+	mergeable := func(payload string) (map[string]any, bool) {
+		var obj map[string]any
+		if json.Unmarshal([]byte(payload), &obj) != nil {
+			return nil, false
+		}
+		if u, has := obj["usage"]; has && u != nil {
+			return nil, false
+		}
+		chs, ok := obj["choices"].([]any)
+		if !ok || len(chs) == 0 {
+			return nil, false
+		}
+		ch0, ok := chs[0].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if fr, ok := ch0["finish_reason"].(string); ok && fr != "" {
+			return nil, false
+		}
+		delta, ok := ch0["delta"].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		// 空 tool_calls 列表（上游每帧都带 "tool_calls":[]）不算工具帧
+		if tcs, has := delta["tool_calls"]; has {
+			if list, ok := tcs.([]any); ok {
+				if len(list) > 0 {
+					return nil, false
+				}
+			} else if tcs != nil {
+				return nil, false
+			}
+		}
+		if fc, has := delta["function_call"]; has && fc != nil {
+			return nil, false
+		}
+		_, hc := delta["content"].(string)
+		_, hr := delta["reasoning_content"].(string)
+		if !hc && !hr {
+			return nil, false
+		}
+		return obj, true
+	}
+
+	writePassthrough := func(payload string) error {
+		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+			return werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return nil
+	}
+
 	br := bufio.NewReaderSize(r, 64*1024)
-	sawDone := false
 	for {
 		line, err := br.ReadString('\n')
-		if line != "" {
-			if strings.HasPrefix(strings.TrimRight(line, "\r\n"), "data: [DONE]") {
-				sawDone = true
+		trimmed := strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(trimmed, "data: [DONE]"):
+			if ferr := flush(); ferr != nil {
+				return ferr
+			}
+			sawDone = true
+			if werr := writePassthrough("[DONE]"); werr != nil {
+				return werr
+			}
+		case strings.HasPrefix(trimmed, "data: "):
+			payload := strings.TrimPrefix(trimmed, "data: ")
+			if obj, ok := mergeable(payload); ok {
+				// 冲刷策略：逐帧即发（平滑流式）。规范化已剥空 content 噪声，
+				// TUI 不再因帧边界断行；切换点（思考↔回答）由下一帧冲刷保证顺序。
+				if base != nil {
+					if ferr := flush(); ferr != nil {
+						return ferr
+					}
+				}
+				if base == nil {
+					base = obj
+				}
+				if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
+					if ch0, ok := chs[0].(map[string]any); ok {
+						delta, _ := ch0["delta"].(map[string]any)
+						if c, ok := delta["content"].(string); ok && c != "" {
+							hasC = true
+							sbC.WriteString(c)
+						}
+						if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
+							hasR = true
+							sbR.WriteString(rc)
+						}
+					}
+				}
+			} else {
+				if ferr := flush(); ferr != nil {
+					return ferr
+				}
+				// 透传帧同样按规范白名单重建（finish/usage/tool_calls 帧等）
+				var pobj map[string]any
+				if json.Unmarshal([]byte(payload), &pobj) == nil {
+					praw, err := json.Marshal(normalizeFrame(pobj))
+					if err == nil {
+						payload = string(praw)
+					}
+				}
+				if werr := writePassthrough(payload); werr != nil {
+					return werr
+				}
+			}
+		case trimmed != "":
+			// 注释/其他行：冲刷待批后原样透传
+			if ferr := flush(); ferr != nil {
+				return ferr
 			}
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return werr
@@ -213,12 +457,16 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 				fl.Flush()
 			}
 		}
+		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
 			return err
 		}
+	}
+	if ferr := flush(); ferr != nil {
+		return ferr
 	}
 	if !sawDone {
 		if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {

@@ -819,6 +819,19 @@ func (p *Pool) AvailableUIDs() []string {
 	return uids
 }
 
+// PeekByUID returns the credential for uid regardless of health/in-flight
+// state, WITHOUT recording usage. Read-only introspection for quota probes:
+// a cooling account should still report its remaining credits.
+func (p *Pool) PeekByUID(uid string) *auth.Auth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return nil
+	}
+	return e.a
+}
+
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
 // 否则返回 nil。供会话粘性路由命中校验与直取使用。
 func (p *Pool) PickByUID(uid string) *auth.Auth {

@@ -4,6 +4,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -53,6 +54,7 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/quota", h.withAuth(h.quota))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
@@ -105,6 +107,52 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+	})
+}
+
+// quota reports per-account credit packages (used/total/remaining/reset) in
+// the 9Router dashboard quota shape: {plan, quotas:{<name>:{used,total,
+// remaining,resetAt,unlimited,recurring}}}. Fetched live from the upstream
+// billing endpoint for every healthy account in the pool.
+func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
+	accounts := h.cfg.Pool.List()
+	type accountQuota struct {
+		UID      string                      `json:"uid"`
+		Nickname string                      `json:"nickname,omitempty"`
+		Credits  int64                       `json:"credits"`
+		Quotas   map[string]upstream.ResourcePackage `json:"quotas"`
+		Error    string                      `json:"error,omitempty"`
+	}
+	out := make([]accountQuota, 0, len(accounts))
+	for _, st := range accounts {
+		aq := accountQuota{UID: st.UID, Nickname: st.Nickname, Credits: st.Credits}
+		a := h.cfg.Pool.PeekByUID(st.UID)
+		if a == nil {
+			aq.Error = "account not in pool; no credential available for a quota probe"
+			out = append(out, aq)
+			continue
+		}
+		pkgs, err := h.cfg.Upstream.ResourcePackages(a)
+		if err != nil {
+			aq.Error = err.Error()
+			out = append(out, aq)
+			continue
+		}
+		aq.Quotas = make(map[string]upstream.ResourcePackage, len(pkgs))
+		seen := map[string]int{}
+		for _, p := range pkgs {
+			name := p.PackageName
+			seen[name]++
+			if seen[name] > 1 {
+				name = fmt.Sprintf("%s %d", name, seen[name])
+			}
+			aq.Quotas[name] = p
+		}
+		out = append(out, aq)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": "workbuddy",
+		"accounts": out,
 	})
 }
 

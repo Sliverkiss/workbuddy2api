@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/credentials"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/session"
@@ -106,6 +107,32 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 		p.SetCredits(a.UID, 1000)
 	}
 	return p
+}
+
+func TestAdminPageAndAPIAuth(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	m := credentials.New(credentials.Config{AuthDir: t.TempDir(), Pool: p})
+	h := NewHandler(Config{Pool: p, Upstream: newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	}), APIKey: "secret", Credentials: m})
+
+	page := httptest.NewRecorder()
+	h.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "凭证与账号池管理") {
+		t.Fatalf("admin page code=%d body=%s", page.Code, page.Body.String())
+	}
+	unauthorized := httptest.NewRecorder()
+	h.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("admin API without key code=%d", unauthorized.Code)
+	}
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
+	authorizedReq.Header.Set("Authorization", "Bearer secret")
+	authorized := httptest.NewRecorder()
+	h.ServeHTTP(authorized, authorizedReq)
+	if authorized.Code != http.StatusOK || !strings.Contains(authorized.Body.String(), `"uid":"u1"`) {
+		t.Fatalf("admin API code=%d body=%s", authorized.Code, authorized.Body.String())
+	}
 }
 
 func TestChatNonStreamAggregates(t *testing.T) {

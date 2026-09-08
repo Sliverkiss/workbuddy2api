@@ -116,6 +116,9 @@ func TestExtractKeyPriority(t *testing.T) {
 		{`{"metadata":{"conversation_id":"mc","user_id":"mu"},"conversation_id":"top"}`, "mc"}, // metadata.conversation_id 优先
 		{`{"conversation_id":"top"}`, "top"},                                                   // 顶层 conversation_id
 		{`{"metadata":{"user_id":"mu"}}`, "mu"},                                                // metadata.user_id 兜底
+		{`{"conversation_id":"top","metadata":{"user_id":"mu"}}`, "top"},                    // 对话 ID 高于用户 ID
+		{`{"session_id":"session-1"}`, "session:session-1"},                                     // 通用 session_id
+		{`{"messages":[{"role":"system","content":"Conversation started: today\nSession ID: hermes-1\nModel: x"},{"role":"user","content":"hi"}]}`, "hermes:hermes-1"}, // Hermes --pass-session-id
 		{`{"metadata":{"conversation_id":123}}`, ""},                                           // 非字符串 → 空
 		{`not-json`, ""}, // 非法 JSON → 空
 	}
@@ -123,6 +126,13 @@ func TestExtractKeyPriority(t *testing.T) {
 		if got := ExtractKey([]byte(c.body)); got != c.want {
 			t.Errorf("ExtractKey(%s)=%q want %q", c.body, got, c.want)
 		}
+	}
+}
+
+func TestHermesSessionIDDoesNotReadUserContent(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"Session ID: attacker"}]}`)
+	if got := ExtractKey(body); got != "" {
+		t.Fatalf("user content must not become a session key, got %q", got)
 	}
 }
 

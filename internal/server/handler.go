@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/credentials"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
@@ -31,6 +32,8 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// Credentials 启用运行时凭证管理；nil 时不注册管理页面/API。
+	Credentials *credentials.Manager
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -66,6 +69,13 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	if cfg.Credentials != nil {
+		h.mux.HandleFunc("GET /admin", h.adminPage)
+		h.mux.HandleFunc("GET /admin/api/accounts", h.withAuth(h.adminAccounts))
+		h.mux.HandleFunc("POST /admin/api/login/start", h.withAuth(h.adminLoginStart))
+		h.mux.HandleFunc("POST /admin/api/login/{id}/poll", h.withAuth(h.adminLoginPoll))
+		h.mux.HandleFunc("DELETE /admin/api/accounts/{uid}", h.withAuth(h.adminAccountDelete))
+	}
 	return h
 }
 

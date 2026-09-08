@@ -795,6 +795,24 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
+// Reactivate 在账号完成一次新的 OAuth 登录后清除旧凭证遗留的禁用、冷却和熔断状态。
+// 新登录拿到的新 session 是人工恢复动作，不应继续继承旧 session-dead 判定。
+func (p *Pool) Reactivate(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.disabled = false
+		e.reason = ""
+		e.until = time.Time{}
+		e.coolKind = 0
+		e.fails = 0
+		e.retryCount = 0
+		e.softStreak = 0
+		e.breakerUntil = time.Time{}
+		p.dirty.Store(true)
+	}
+}
+
 // reviveCoolingLocked 只清冷却（until/coolKind/reason/softStreak）并更新 credits，不动熔断器
 // （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
 // billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。

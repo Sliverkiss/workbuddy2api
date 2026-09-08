@@ -120,15 +120,61 @@ func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
 		UID      string                      `json:"uid"`
 		Nickname string                      `json:"nickname,omitempty"`
 		Credits  int64                       `json:"credits"`
-		Quotas   map[string]upstream.ResourcePackage `json:"quotas"`
-		Error    string                      `json:"error,omitempty"`
+		Cooling  bool                        `json:"cooling"`
+		CoolKind string                      `json:"cool_kind,omitempty"`
+		// ISO deadline of the active cooldown ("until"), plus pre-formatted
+		// "2h 13m 05s"-style remaining time so dashboards can render both.
+		CoolUntil    string                              `json:"cool_until,omitempty"`
+		CoolRemaining string                             `json:"cool_remaining,omitempty"`
+		Reason       string                              `json:"reason,omitempty"`
+		Disabled     bool                                `json:"disabled"`
+		SuccessCount int64                               `json:"success_count,omitempty"`
+		ErrTotal     int64                               `json:"err_total,omitempty"`
+		Quotas       map[string]upstream.ResourcePackage `json:"quotas"`
+		Error        string                              `json:"error,omitempty"`
+	}
+	formatRemaining := func(d time.Duration) string {
+		if d <= 0 {
+			return ""
+		}
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		s := int(d.Seconds()) % 60
+		if h > 0 {
+			return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+		}
+		if m > 0 {
+			return fmt.Sprintf("%dm %02ds", m, s)
+		}
+		return fmt.Sprintf("%ds", s)
 	}
 	out := make([]accountQuota, 0, len(accounts))
 	for _, st := range accounts {
-		aq := accountQuota{UID: st.UID, Nickname: st.Nickname, Credits: st.Credits}
+		aq := accountQuota{
+			UID:          st.UID,
+			Nickname:     st.Nickname,
+			Credits:      st.Credits,
+			Cooling:      st.Cooling,
+			CoolKind:     st.CoolKind,
+			Reason:       st.Reason,
+			Disabled:     st.Disabled,
+			SuccessCount: st.SuccessCount,
+			ErrTotal:     st.ErrTotal,
+		}
+		if st.Cooling && !st.Until.IsZero() {
+			aq.CoolUntil = st.Until.Format(time.RFC3339)
+			aq.CoolRemaining = formatRemaining(time.Until(st.Until))
+		}
 		a := h.cfg.Pool.PeekByUID(st.UID)
 		if a == nil {
 			aq.Error = "account not in pool; no credential available for a quota probe"
+			out = append(out, aq)
+			continue
+		}
+		// Skip the live billing probe while the account is cooling — upstream
+		// is already throttling it and another call just extends the 429s.
+		if st.Cooling {
+			aq.Error = "cooling: quota probe skipped to avoid extending rate limit"
 			out = append(out, aq)
 			continue
 		}

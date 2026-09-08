@@ -53,6 +53,13 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Per-account pinned endpoints. A gateway that wants to round-robin at
+	// ITS layer (e.g. 9Router with N connections) needs one target per
+	// account, otherwise every connection would race for the same shared
+	// pool Pick(). /v1/a/<uid>/... pins every request to that account.
+	h.mux.HandleFunc("POST /v1/a/{uid}/chat/completions", h.withAuth(h.pinnedChat))
+	h.mux.HandleFunc("GET /v1/a/{uid}/quota", h.withAuth(h.pinnedQuota))
+	h.mux.HandleFunc("GET /v1/accounts", h.withAuth(h.accounts))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /v1/quota", h.withAuth(h.quota))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -114,25 +121,89 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 // the 9Router dashboard quota shape: {plan, quotas:{<name>:{used,total,
 // remaining,resetAt,unlimited,recurring}}}. Fetched live from the upstream
 // billing endpoint for every healthy account in the pool.
-func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
-	accounts := h.cfg.Pool.List()
-	type accountQuota struct {
-		UID      string                      `json:"uid"`
-		Nickname string                      `json:"nickname,omitempty"`
-		Credits  int64                       `json:"credits"`
-		Cooling  bool                        `json:"cooling"`
-		CoolKind string                      `json:"cool_kind,omitempty"`
-		// ISO deadline of the active cooldown ("until"), plus pre-formatted
-		// "2h 13m 05s"-style remaining time so dashboards can render both.
-		CoolUntil    string                              `json:"cool_until,omitempty"`
-		CoolRemaining string                             `json:"cool_remaining,omitempty"`
-		Reason       string                              `json:"reason,omitempty"`
-		Disabled     bool                                `json:"disabled"`
-		SuccessCount int64                               `json:"success_count,omitempty"`
-		ErrTotal     int64                               `json:"err_total,omitempty"`
-		Quotas       map[string]upstream.ResourcePackage `json:"quotas"`
-		Error        string                              `json:"error,omitempty"`
+// accounts lists every pool member with its pinned endpoint, so an upstream
+// gateway (9Router etc.) can create one connection per account and round-robin
+// across them instead of sharing a single pooled connection.
+func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
+	list := h.cfg.Pool.List()
+	type acct struct {
+		UID        string `json:"uid"`
+		Nickname   string `json:"nickname,omitempty"`
+		Credits    int64  `json:"credits"`
+		Cooling    bool   `json:"cooling"`
+		Disabled   bool   `json:"disabled"`
+		ChatPath   string `json:"chat_path"`
+		QuotaPath  string `json:"quota_path"`
+		CoolUntil  string `json:"cool_until,omitempty"`
+		Remaining  string `json:"cool_remaining,omitempty"`
 	}
+	out := make([]acct, 0, len(list))
+	for _, st := range list {
+		a := acct{
+			UID:       st.UID,
+			Nickname:  st.Nickname,
+			Credits:   st.Credits,
+			Cooling:   st.Cooling,
+			Disabled:  st.Disabled,
+			ChatPath:  "/v1/a/" + st.UID + "/chat/completions",
+			QuotaPath: "/v1/a/" + st.UID + "/quota",
+		}
+		if st.Cooling && !st.Until.IsZero() {
+			a.CoolUntil = st.Until.Format(time.RFC3339)
+			a.Remaining = time.Until(st.Until).Round(time.Second).String()
+		}
+		out = append(out, a)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"provider": "workbuddy", "accounts": out})
+}
+
+// pinnedChat serves /v1/a/<uid>/chat/completions by pinning to that account.
+func (h *Handler) pinnedChat(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if uid == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "missing account uid")
+		return
+	}
+	if h.cfg.Pool.PeekByUID(uid) == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found: "+uid)
+		return
+	}
+	h.chatCompletions(w, r)
+}
+
+// pinnedQuota serves /v1/a/<uid>/quota — same payload as /v1/quota but only
+// that one account, so a per-account connection reports its own credits.
+func (h *Handler) pinnedQuota(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if uid == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "missing account uid")
+		return
+	}
+	// Reuse the shared quota builder, then filter down to the pinned account.
+	all := h.buildAccountQuotas()
+	for _, a := range all {
+		if a.UID == uid {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"provider": "workbuddy",
+				"accounts": []accountQuota{a},
+			})
+			return
+		}
+	}
+	writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found: "+uid)
+}
+
+func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": "workbuddy",
+		"accounts": h.buildAccountQuotas(),
+	})
+}
+
+// buildAccountQuotas returns one quota row per pool account (shared by /v1/quota
+// and the per-account /v1/a/<uid>/quota endpoint).
+func (h *Handler) buildAccountQuotas() []accountQuota {
+	accounts := h.cfg.Pool.List()
 	formatRemaining := func(d time.Duration) string {
 		if d <= 0 {
 			return ""
@@ -196,10 +267,26 @@ func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, aq)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"provider": "workbuddy",
-		"accounts": out,
-	})
+	return out
+}
+
+// accountQuota is one pool account's credit/cooling snapshot.
+type accountQuota struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Credits  int64  `json:"credits"`
+	Cooling  bool   `json:"cooling"`
+	CoolKind string `json:"cool_kind,omitempty"`
+	// ISO deadline of the active cooldown ("until"), plus pre-formatted
+	// "2h 13m 05s"-style remaining time so dashboards can render both.
+	CoolUntil     string                              `json:"cool_until,omitempty"`
+	CoolRemaining string                              `json:"cool_remaining,omitempty"`
+	Reason        string                              `json:"reason,omitempty"`
+	Disabled      bool                                `json:"disabled"`
+	SuccessCount  int64                               `json:"success_count,omitempty"`
+	ErrTotal      int64                               `json:"err_total,omitempty"`
+	Quotas        map[string]upstream.ResourcePackage `json:"quotas"`
+	Error         string                              `json:"error,omitempty"`
 }
 
 // 静态模型表（api-reference §5 回退 + WorkBuddy GLOBAL catalog 2026-09-07）。
@@ -328,7 +415,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	sessKey := ""
 	stickyUID := ""
-	if h.cfg.Session != nil {
+	// Account pinning: /v1/a/<uid>/chat/completions forces every request to
+	// that one account so an upstream gateway can round-robin across its own
+	// per-account connections instead of racing the shared pool Pick().
+	if pinUID := r.PathValue("uid"); pinUID != "" {
+		stickyUID = pinUID
+	}
+	if stickyUID == "" && h.cfg.Session != nil {
 		sessKey = session.ExtractKey(body)
 		if sessKey != "" {
 			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {

@@ -81,7 +81,15 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
+	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
+	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
+		tr.ResponseHeaderTimeout = up.HeaderTimeout
+	}
+	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
+	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 
 	sch := scheduler.New(scheduler.Config{

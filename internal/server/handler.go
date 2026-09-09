@@ -4,6 +4,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -52,7 +53,15 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Per-account pinned endpoints. A gateway that wants to round-robin at
+	// ITS layer (e.g. 9Router with N connections) needs one target per
+	// account, otherwise every connection would race for the same shared
+	// pool Pick(). /v1/a/<uid>/... pins every request to that account.
+	h.mux.HandleFunc("POST /v1/a/{uid}/chat/completions", h.withAuth(h.pinnedChat))
+	h.mux.HandleFunc("GET /v1/a/{uid}/quota", h.withAuth(h.pinnedQuota))
+	h.mux.HandleFunc("GET /v1/accounts", h.withAuth(h.accounts))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/quota", h.withAuth(h.quota))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
@@ -108,16 +117,198 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// 静态 CN 模型表（api-reference §5，动态接口失败时的回退）。
+// quota reports per-account credit packages (used/total/remaining/reset) in
+// the 9Router dashboard quota shape: {plan, quotas:{<name>:{used,total,
+// remaining,resetAt,unlimited,recurring}}}. Fetched live from the upstream
+// billing endpoint for every healthy account in the pool.
+// accounts lists every pool member with its pinned endpoint, so an upstream
+// gateway (9Router etc.) can create one connection per account and round-robin
+// across them instead of sharing a single pooled connection.
+func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
+	list := h.cfg.Pool.List()
+	type acct struct {
+		UID        string `json:"uid"`
+		Nickname   string `json:"nickname,omitempty"`
+		Credits    int64  `json:"credits"`
+		Cooling    bool   `json:"cooling"`
+		Disabled   bool   `json:"disabled"`
+		ChatPath   string `json:"chat_path"`
+		QuotaPath  string `json:"quota_path"`
+		CoolUntil  string `json:"cool_until,omitempty"`
+		Remaining  string `json:"cool_remaining,omitempty"`
+	}
+	out := make([]acct, 0, len(list))
+	for _, st := range list {
+		a := acct{
+			UID:       st.UID,
+			Nickname:  st.Nickname,
+			Credits:   st.Credits,
+			Cooling:   st.Cooling,
+			Disabled:  st.Disabled,
+			ChatPath:  "/v1/a/" + st.UID + "/chat/completions",
+			QuotaPath: "/v1/a/" + st.UID + "/quota",
+		}
+		if st.Cooling && !st.Until.IsZero() {
+			a.CoolUntil = st.Until.Format(time.RFC3339)
+			a.Remaining = time.Until(st.Until).Round(time.Second).String()
+		}
+		out = append(out, a)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"provider": "workbuddy", "accounts": out})
+}
+
+// pinnedChat serves /v1/a/<uid>/chat/completions by pinning to that account.
+func (h *Handler) pinnedChat(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if uid == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "missing account uid")
+		return
+	}
+	if h.cfg.Pool.PeekByUID(uid) == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found: "+uid)
+		return
+	}
+	h.chatCompletions(w, r)
+}
+
+// pinnedQuota serves /v1/a/<uid>/quota — same payload as /v1/quota but only
+// that one account, so a per-account connection reports its own credits.
+func (h *Handler) pinnedQuota(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	if uid == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "missing account uid")
+		return
+	}
+	// Reuse the shared quota builder, then filter down to the pinned account.
+	all := h.buildAccountQuotas()
+	for _, a := range all {
+		if a.UID == uid {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"provider": "workbuddy",
+				"accounts": []accountQuota{a},
+			})
+			return
+		}
+	}
+	writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found: "+uid)
+}
+
+func (h *Handler) quota(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": "workbuddy",
+		"accounts": h.buildAccountQuotas(),
+	})
+}
+
+// buildAccountQuotas returns one quota row per pool account (shared by /v1/quota
+// and the per-account /v1/a/<uid>/quota endpoint).
+func (h *Handler) buildAccountQuotas() []accountQuota {
+	accounts := h.cfg.Pool.List()
+	formatRemaining := func(d time.Duration) string {
+		if d <= 0 {
+			return ""
+		}
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		s := int(d.Seconds()) % 60
+		if h > 0 {
+			return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+		}
+		if m > 0 {
+			return fmt.Sprintf("%dm %02ds", m, s)
+		}
+		return fmt.Sprintf("%ds", s)
+	}
+	out := make([]accountQuota, 0, len(accounts))
+	for _, st := range accounts {
+		aq := accountQuota{
+			UID:          st.UID,
+			Nickname:     st.Nickname,
+			Credits:      st.Credits,
+			Cooling:      st.Cooling,
+			CoolKind:     st.CoolKind,
+			Reason:       st.Reason,
+			Disabled:     st.Disabled,
+			SuccessCount: st.SuccessCount,
+			ErrTotal:     st.ErrTotal,
+		}
+		if st.Cooling && !st.Until.IsZero() {
+			aq.CoolUntil = st.Until.Format(time.RFC3339)
+			aq.CoolRemaining = formatRemaining(time.Until(st.Until))
+		}
+		a := h.cfg.Pool.PeekByUID(st.UID)
+		if a == nil {
+			aq.Error = "account not in pool; no credential available for a quota probe"
+			out = append(out, aq)
+			continue
+		}
+		// Skip the live billing probe while the account is cooling — upstream
+		// is already throttling it and another call just extends the 429s.
+		if st.Cooling {
+			aq.Error = "cooling: quota probe skipped to avoid extending rate limit"
+			out = append(out, aq)
+			continue
+		}
+		pkgs, err := h.cfg.Upstream.ResourcePackages(a)
+		if err != nil {
+			aq.Error = err.Error()
+			out = append(out, aq)
+			continue
+		}
+		aq.Quotas = make(map[string]upstream.ResourcePackage, len(pkgs))
+		seen := map[string]int{}
+		for _, p := range pkgs {
+			name := p.PackageName
+			seen[name]++
+			if seen[name] > 1 {
+				name = fmt.Sprintf("%s %d", name, seen[name])
+			}
+			aq.Quotas[name] = p
+		}
+		out = append(out, aq)
+	}
+	return out
+}
+
+// accountQuota is one pool account's credit/cooling snapshot.
+type accountQuota struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Credits  int64  `json:"credits"`
+	Cooling  bool   `json:"cooling"`
+	CoolKind string `json:"cool_kind,omitempty"`
+	// ISO deadline of the active cooldown ("until"), plus pre-formatted
+	// "2h 13m 05s"-style remaining time so dashboards can render both.
+	CoolUntil     string                              `json:"cool_until,omitempty"`
+	CoolRemaining string                              `json:"cool_remaining,omitempty"`
+	Reason        string                              `json:"reason,omitempty"`
+	Disabled      bool                                `json:"disabled"`
+	SuccessCount  int64                               `json:"success_count,omitempty"`
+	ErrTotal      int64                               `json:"err_total,omitempty"`
+	Quotas        map[string]upstream.ResourcePackage `json:"quotas"`
+	Error         string                              `json:"error,omitempty"`
+}
+
+// 静态模型表（api-reference §5 回退 + WorkBuddy GLOBAL catalog 2026-09-07）。
 var staticModels = []map[string]any{
-	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "kimi-k2.7", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "hy4-preview", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 1000000},
 	{"id": "hy3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "hy3-preview", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "hy3-preview-agent", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "gpt-5.6-sol", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gpt-5.6-terra", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gpt-5.6-luna", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gpt-5.5", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gpt-5.4", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gpt-5.3-codex", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 400000},
+	{"id": "gemini-3.5-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 1000000},
+	{"id": "glm-5.3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 200000},
+	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "kimi-k3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 256000},
+	{"id": "kimi-k2.7", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "deepseek-v4-pro", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 }
@@ -224,7 +415,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	sessKey := ""
 	stickyUID := ""
-	if h.cfg.Session != nil {
+	// Account pinning: /v1/a/<uid>/chat/completions forces every request to
+	// that one account so an upstream gateway can round-robin across its own
+	// per-account connections instead of racing the shared pool Pick().
+	if pinUID := r.PathValue("uid"); pinUID != "" {
+		stickyUID = pinUID
+	}
+	if stickyUID == "" && h.cfg.Session != nil {
 		sessKey = session.ExtractKey(body)
 		if sessKey != "" {
 			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {

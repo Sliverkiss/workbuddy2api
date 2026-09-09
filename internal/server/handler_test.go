@@ -48,10 +48,8 @@ func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body 
 				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
 		})},
-		ChatBaseCN:      "https://fake.example",
-		BillingBaseCN:   "https://fake.example",
-		ChatBaseGlobal:  "https://fake.example",
-		BillingBaseGlob: "https://fake.example",
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
 	}
 }
 
@@ -385,10 +383,8 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return nil, errors.New("connection refused")
 		})},
-		ChatBaseCN:      "https://fake.example",
-		ChatBaseGlobal:  "https://fake.example",
-		BillingBaseCN:   "https://fake.example",
-		BillingBaseGlob: "https://fake.example",
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
 	}
 	// 传输错误不喂熔断计数：一次 transport error 不应累计 errTotal 也不应熔断。
 	h := NewHandler(Config{Pool: p, Upstream: up})

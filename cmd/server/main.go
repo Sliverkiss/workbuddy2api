@@ -36,11 +36,11 @@ func main() {
 		}
 	}
 
-	auths, err := auth.LoadDir(cfg.AuthDir, cfg.Region)
+	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
 	}
-	log.Printf("loaded %d %s account(s) from %s", len(auths), cfg.Region, cfg.AuthDir)
+	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)

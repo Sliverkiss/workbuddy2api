@@ -83,11 +83,9 @@ func TestRunCheckinReenablesCoolingAccount(t *testing.T) {
 	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
 
 	up := &upstream.Client{
-		HTTP:            srv.Client(),
-		ChatBaseCN:      srv.URL,
-		BillingBaseCN:   srv.URL,
-		ChatBaseGlobal:  srv.URL,
-		BillingBaseGlob: srv.URL,
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{
 		Pool:           p,
@@ -118,11 +116,9 @@ func TestRunKeepaliveRefreshesTokens(t *testing.T) {
 	p.Add(a)
 
 	up := &upstream.Client{
-		HTTP:            srv.Client(),
-		ChatBaseCN:      srv.URL,
-		BillingBaseCN:   srv.URL,
-		ChatBaseGlobal:  srv.URL,
-		BillingBaseGlob: srv.URL,
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
 	s.RunKeepaliveNow()
@@ -146,11 +142,9 @@ func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
 	p.Add(a)
 
 	up := &upstream.Client{
-		HTTP:            srv.Client(),
-		ChatBaseCN:      srv.URL,
-		BillingBaseCN:   srv.URL,
-		ChatBaseGlobal:  srv.URL,
-		BillingBaseGlob: srv.URL,
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
 	s.RunKeepaliveNow()
@@ -170,11 +164,9 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	up := &upstream.Client{
-		HTTP:            srv.Client(),
-		ChatBaseCN:      srv.URL,
-		BillingBaseCN:   srv.URL,
-		ChatBaseGlobal:  srv.URL,
-		BillingBaseGlob: srv.URL,
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
 	// 不应 panic

@@ -22,7 +22,7 @@ func TestDefault(t *testing.T) {
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k","region":"cn"}`), 0o600)
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k"}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)

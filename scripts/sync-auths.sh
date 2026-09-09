@@ -9,7 +9,7 @@ docker cp cpa-manager-plus-cli-proxy-api-1:/root/.cli-proxy-api/. /tmp/wb-sync/ 
 kept=0; skipped=0
 for f in /tmp/wb-sync/workbuddy*.json; do
   [ -e "$f" ] || continue
-  # domain 为空或 codebuddy.cn → CN；否则跳过（global）
+  # domain 为空或 codebuddy.cn → CN；否则跳过（非 CN）
   dom=$(grep -o '"domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" | head -1 | sed 's/.*: *"//;s/"$//')
   case "$dom" in
     ""|*codebuddy.cn*)
@@ -19,4 +19,4 @@ for f in /tmp/wb-sync/workbuddy*.json; do
   esac
 done
 chmod 600 auths/*.json 2>/dev/null || true
-echo "kept_cn=$kept skipped_global=$skipped total_in_auths=$(ls auths/ | wc -l)"
+echo "kept_cn=$kept skipped_non_cn=$skipped total_in_auths=$(ls auths/ | wc -l)"

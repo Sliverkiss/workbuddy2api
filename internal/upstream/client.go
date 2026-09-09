@@ -130,10 +130,8 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
-	ChatBaseCN      string
-	BillingBaseCN   string
-	ChatBaseGlobal  string
-	BillingBaseGlob string
+	ChatBaseCN    string
+	BillingBaseCN string
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
@@ -151,8 +149,6 @@ func New() *Client {
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
-		ChatBaseGlobal:       "https://www.workbuddy.ai",
-		BillingBaseGlob:      "https://www.workbuddy.ai",
 	}
 }
 
@@ -165,9 +161,6 @@ func (c *Client) chatHTTP() *http.Client {
 }
 
 func (c *Client) chatBase(a *auth.Auth) string {
-	if a != nil && a.Region() == "global" {
-		return c.ChatBaseGlobal
-	}
 	return c.ChatBaseCN
 }
 
@@ -191,9 +184,6 @@ func (c *Client) effortsSnapshot() map[string][]string {
 }
 
 func (c *Client) billingBase(a *auth.Auth) string {
-	if a != nil && a.Region() == "global" {
-		return c.BillingBaseGlob
-	}
 	return c.BillingBaseCN
 }
 

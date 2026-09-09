@@ -18,9 +18,6 @@ func TestParseNested(t *testing.T) {
 	if sa.UID != "u1" || sa.EnterpriseID != "e1" || sa.Nickname != "n1" {
 		t.Errorf("account: %+v", sa)
 	}
-	if sa.Region() != "cn" {
-		t.Errorf("region want cn, got %s", sa.Region())
-	}
 }
 
 func TestParseFlat(t *testing.T) {
@@ -34,21 +31,6 @@ func TestParseFlat(t *testing.T) {
 func TestParseMissingToken(t *testing.T) {
 	if _, err := Parse([]byte(`{"uid":"u3"}`)); err == nil {
 		t.Fatal("want error for missing accessToken")
-	}
-}
-
-func TestGlobalRegion(t *testing.T) {
-	for _, d := range []string{"workbuddy.ai", "www.workbuddy.ai", "api.workbuddy.ai", "WorkBuddy.AI"} {
-		sa := &Auth{Domain: d}
-		if sa.Region() != "global" {
-			t.Errorf("domain %q want global, got %s", d, sa.Region())
-		}
-	}
-	for _, d := range []string{"", "codebuddy.cn", "www.codebuddy.cn"} {
-		sa := &Auth{Domain: d}
-		if sa.Region() != "cn" {
-			t.Errorf("domain %q want cn, got %s", d, sa.Region())
-		}
 	}
 }
 
@@ -76,24 +58,28 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 }
 
-func TestLoadDirFiltersRegion(t *testing.T) {
+// TestLoadDirLoadsAllValid 不再按 region 过滤：所有可解析的 auth 文件都被加载，
+// 解析失败的文件静默跳过。
+func TestLoadDirLoadsAllValid(t *testing.T) {
 	dir := t.TempDir()
 	cn := `{"auth":{"accessToken":"at1","refreshToken":"r","expiresAt":1,"domain":""},"account":{"uid":"cn1"}}`
-	gl := `{"auth":{"accessToken":"at2","refreshToken":"r","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`
+	other := `{"auth":{"accessToken":"at2","refreshToken":"r","expiresAt":1,"domain":"example.com"},"account":{"uid":"u2"}}`
 	bad := `not json`
 	os.WriteFile(filepath.Join(dir, "workbuddy-cn1.json"), []byte(cn), 0o600)
-	os.WriteFile(filepath.Join(dir, "workbuddy-g1.json"), []byte(gl), 0o600)
+	os.WriteFile(filepath.Join(dir, "workbuddy-u2.json"), []byte(other), 0o600)
 	os.WriteFile(filepath.Join(dir, "workbuddy-bad.json"), []byte(bad), 0o600)
 
-	list, err := LoadDir(dir, "cn")
+	list, err := LoadDir(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(list) != 1 || list[0].UID != "cn1" {
-		t.Fatalf("want 1 cn account, got %+v", list)
+	if len(list) != 2 {
+		t.Fatalf("want 2 valid accounts, got %+v", list)
 	}
-	if list[0].FilePath == "" {
-		t.Error("FilePath not set")
+	for _, a := range list {
+		if a.FilePath == "" {
+			t.Error("FilePath not set")
+		}
 	}
 }
 

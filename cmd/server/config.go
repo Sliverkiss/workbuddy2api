@@ -16,7 +16,6 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
-	Region    string `json:"region"`     // 只收 "cn"
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -79,7 +78,6 @@ func Default() *Config {
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
-		Region:    "cn",
 	}
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
@@ -132,9 +130,6 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
-	}
-	if v := os.Getenv("WB2A_REGION"); v != "" {
-		c.Region = v
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
@@ -197,13 +192,6 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
-	}
-	if c.Region == "" {
-		c.Region = "cn"
-	}
-	c.Region = strings.ToLower(c.Region)
-	if c.Region != "cn" && c.Region != "global" {
-		return fmt.Errorf("region must be cn or global, got %q", c.Region)
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或 CPA 面板扁平形）。
+// Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {
 	// mu 串行化 RefreshToken 写与 SaveAtomic 读，防止并发写回半更新 token。
 	mu sync.Mutex
@@ -44,7 +44,7 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 // Parse 兼容两种磁盘形态：
 //
 //	嵌套形 {"auth":{...},"account":{...}}  （插件 OAuth 输出）
-//	扁平形 {"accessToken":...,"uid":...}   （CPA 面板手建）
+//	扁平形 {"accessToken":...,"uid":...}   （手写/旧版）
 func Parse(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
@@ -109,7 +109,7 @@ func Parse(raw []byte) (*Auth, error) {
 	return &a, nil
 }
 
-// SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持 CPA 插件可读格式。
+// SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
 // 全程持 a.mu：防止与 RefreshToken 修改 token 字段并发，杜绝写回半更新。
 // 防御：accessToken 为空时拒绝写回，避免误用空凭证覆盖有效文件。
 func (a *Auth) SaveAtomic() error {

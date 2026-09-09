@@ -363,7 +363,6 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `./scripts/sync-auths.sh` | 从 CPA 容器拷出 CN auth（chmod 600） |
 
 ## 🛠️ 开发
 

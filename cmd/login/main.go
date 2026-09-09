@@ -1,5 +1,4 @@
-// login.go — WorkBuddy CN OAuth 登录（与 CPA 插件 /root/qoderwork/workbuddy/oauth.go
-// 的 handleStartLogin + handlePollLogin 逐字一致的实现，CN realm only）。
+// login.go — WorkBuddy CN OAuth 登录（设备授权流程，CN realm only）。
 //
 // 两个子命令，由 login.sh 顺序驱动：
 //
@@ -9,7 +8,7 @@
 //	              成功再 GET /v2/plugin/login/account?state= 拿 uid/nickname，
 //	              stdout 打印完整 token+account JSON
 //
-// 无 PKCE（workbuddy 设备流由服务端签发 state，与 qoderwork 不同）。
+// 无 PKCE（workbuddy 设备流由服务端签发 state）。
 package main
 
 import (
@@ -23,7 +22,7 @@ import (
 	"time"
 )
 
-// 与 /root/qoderwork/workbuddy/main.go:82-96 完全一致的常量（CN only）
+// 上游常量（CN only）
 const (
 	upstreamBaseCN    = "https://copilot.tencent.com"
 	clientUA          = "CLI/2.63.2 CodeBuddy/2.63.2"
@@ -34,7 +33,7 @@ const (
 	stateFile         = "/tmp/wb2api-login-state.json"
 )
 
-// commonHeaders 与 main.go:496-503 一致
+// commonHeaders 通用请求头
 func commonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")

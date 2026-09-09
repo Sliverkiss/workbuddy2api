@@ -10,8 +10,7 @@
 //	 "total":{"remain":N,"used":N,"size":N,"accounts":N,"ok":N,"failed":N},
 //	 "accounts":[{"uid","nickname","remain","used","size","packages","ok","error?"}]}
 //
-// 接口与聚合逻辑移植自 /root/qoderwork/workbuddy/billing.go fetchUserResource：
-// POST codebuddy.cn/v2/billing/meter/get-user-resource，聚合所有 package 的
+// 接口与聚合逻辑：POST codebuddy.cn/v2/billing/meter/get-user-resource，聚合所有 package 的
 // Cycle* 字段，TotalDosage 作 size 下限。
 package main
 

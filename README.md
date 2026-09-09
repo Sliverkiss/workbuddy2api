@@ -5,14 +5,13 @@
 <h1 align="center">WorkBuddy2API</h1>
 
 <p align="center">
-  <b>把 CodeBuddy / WorkBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
+  <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
   OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到保活 · 流式/非流式
 </p>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
-  <img alt="Region" src="https://img.shields.io/badge/Region-CN-FF6F00?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
 </p>
@@ -21,13 +20,13 @@
 
 ## 📖 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯系 CodeBuddy（WorkBuddy CN，`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。代码同时内置了 WorkBuddy Global（`www.workbuddy.ai`）的 host 映射与 region 判定分支，但**该路径没有端到端验证记录**——本项目当前以 CN 区域为准。
+WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权** 获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却/熔断防止雪崩、会话粘性保证多轮上下文不跳号；
 - 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
 
-> ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy / WorkBuddy 账号作为上游，**仅限本人授权账号、本机/私有环境测试**。详细边界见 [安全与合规](#-安全与合规)。
+> ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机/私有环境测试**。详细边界见 [安全与合规](#-安全与合规)。
 
 ## ✨ 核心能力
 
@@ -40,7 +39,6 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻；22:00 全账号 token 刷新保活 |
 | ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
-| 🌐 **区域** | CN（CodeBuddy）主用；Global（workbuddy.ai）host 分支代码内置、未端到端验证 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 可接负载均衡 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
@@ -62,9 +60,8 @@ flowchart LR
 
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
-    U -->|"v2/chat/completions (SSE)"| CB["CodeBuddy CN\ncopilot.tencent.com"]
+    U -->|"v2/chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
     U -->|"billing / auth / models"| CB
-    U -.->|"同一套 /v2/* 接口（代码映射，未实测）"| WB["WorkBuddy Global\nwww.workbuddy.ai\n（无端到端验证）"]
 ```
 
 ## 🚀 快速开始
@@ -72,7 +69,7 @@ flowchart LR
 ### 环境要求
 
 - **Docker + Docker Compose**（推荐部署方式，镜像内已含 `app` 低权限用户）
-- 一个（或多个）已注册的 CodeBuddy / WorkBuddy 账号，用于 OAuth 登录
+- 一个（或多个）已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅本地直接编译时需要）
 
 ### 1. 克隆并配置
@@ -143,7 +140,6 @@ curl -s http://localhost:7863/v1/chat/completions \
   "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
-  "region": "cn",
   "cooldown": { "soft_rate": "60s" },
   "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22] },
   "upstream": {
@@ -173,7 +169,6 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
-| `region` | `cn` | 默认 `cn`；代码接受 `global` 并切换上游 host，但 Global 路径未端到端验证 |
 | `cooldown.soft_rate` | `60s` | 429/404 软冷却时长 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询 |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
@@ -200,13 +195,13 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `header_timeout_seconds` | 聊天 SSE **首字节前** | `120` | 由 `Transport.ResponseHeaderTimeout` 约束；超时 = 换号重发 |
 | `idle_timeout_seconds` | 聊天 SSE **流中空闲** | `300` | 活跃吐数据**续命**不掐；静默超时才断流释放租约 |
 
-聊天流（`stream` true/false 均同）**没有总时长上限**：聊天使用 `Timeout=0` 的专用 client，长思考/长输出（如超长 reasoning）不会被 120s 掐断。样例未列出的未知 JSON 字段会被解析器忽略，不影响运行。
+聊天流（`stream` true/false 均同）**没有总时长上限**：聊天使用 `Timeout=0` 的专用 client，长思考/长输出（如超长 reasoning）不会被 120s 掐断。
 
 ### 环境变量覆盖
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_REGION` · `WB2A_SOFT_RATE`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool）
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool）
 
 ## 🧠 账号池与流量治理
 
@@ -305,11 +300,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `TTFB` | 流式首帧耗时（非流式为 `-`） |
 | `tok` / `tok/s` / `total` | 输出 token 数 / 速率 / 总时长 |
 
-敏感度见 [安全与合规](#-安全与合规) 第 2 节：**不含任何 token 明文**，无落盘日志文件。
+**敏感度**：日志不含任何 token 明文（详见[安全与合规](#-安全与合规)），无落盘日志文件。
 
 ## 🛡️ 安全与合规
-
-> 以下内容可对照源码复核，关键断言出处见文末[附录](#-附录关键断言与代码出处)。
 
 ### 1. 凭据管理（auths）
 
@@ -335,18 +328,18 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 3. 上游访问端点清单
 
-| 端点 | 方法 | Host（按 region） | 用途 |
+| 端点 | 方法 | Host | 用途 |
 |---|---|---|---|
-| `/v2/chat/completions` | POST | cn `copilot.tencent.com` / global `www.workbuddy.ai` | 聊天补全（SSE） |
+| `/v2/chat/completions` | POST | `copilot.tencent.com` | 聊天补全（SSE） |
 | `/console/enterprises/personal/models` | GET | 同上 | 动态模型列表 |
 | `/v2/plugin/auth/token/refresh` | POST | 同上 | token 刷新 |
-| `/v2/billing/meter/daily-checkin` | POST | cn `www.codebuddy.cn` / global `www.workbuddy.ai` | 每日签到 |
+| `/v2/billing/meter/daily-checkin` | POST | `www.codebuddy.cn` | 每日签到 |
 | `/v2/billing/meter/get-user-resource` | POST | 同上 | 余额查询 |
-| `/v2/plugin/auth/state?platform=CLI` | POST | `copilot.tencent.com`（CN） | OAuth 取授权 URL |
+| `/v2/plugin/auth/state?platform=CLI` | POST | `copilot.tencent.com` | OAuth 取授权 URL |
 | `/v2/plugin/auth/token?state=` | GET | 同上 | OAuth 轮询取 token |
 | `/v2/plugin/login/account?state=` | GET | 同上 | OAuth 取账号信息 |
 
-> 上述 `/v2/*` 端点是 CodeBuddy / WorkBuddy 官方 CLI/插件使用的接口，**未见公开 API 文档，属非公开/逆向接口**；本项目不主张任何上游接口的官方授权或稳定性承诺。出站统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**。表中 global 列来自代码内置 host 常量（`www.workbuddy.ai`），**无端到端验证记录**；本项目实测与在役账号均为 CN。
+> 上述 `/v2/*` 端点是 CodeBuddy 官方 CLI/插件使用的接口，**未见公开 API 文档，属非公开/逆向接口**；本项目不主张任何上游接口的官方授权或稳定性承诺。出站统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**。
 
 ### 4. 发布来源与合规边界
 
@@ -354,13 +347,13 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 构建命令：`CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server`（Dockerfile 多阶段：`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）
 - 登录/签到/积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`（缺失时自动编译对应 `cmd/*`）
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
-- 上游 CodeBuddy / WorkBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
+- 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 5. 授权使用边界
 
 - 仅限**本人授权账号**、本机/私有环境测试
 - 不得共享、转售、违规分发，或用于违反目标平台条款的用途
-- 遵守 CodeBuddy / WorkBuddy 平台服务条款与所在地法律
+- 遵守 CodeBuddy 平台服务条款与所在地法律
 - 妥善保管 `auths/`（明文凭证）与网关端口
 
 ## 🧰 工具脚本
@@ -404,37 +397,8 @@ internal/
 
 ## 免责声明
 
-本项目仅供学习和研究使用。使用者需遵守 WorkBuddy / CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
+本项目仅供学习和研究使用。使用者需遵守 CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
 
 ## License
 
 本仓库未包含 LICENSE 文件。如需使用或再分发，请向仓库所有者确认授权条款。
-
----
-
-## 📎 附录：关键断言与代码出处
-
-| # | 关键断言 | 代码出处 |
-|---|---|---|
-| 1 | 默认 `:7863` / `api_key` 空 / `./auths` / `./data/state.json` / `cn` | `cmd/server/config.go` `Default()` |
-| 2 | 签到 `[9,21]`、保活 `[22]` | `cmd/server/config.go` + `internal/scheduler/scheduler.go` |
-| 3 | 超时三段回落：header→timeout、idle→300 | `cmd/server/config.go` `normalize()` |
-| 4 | 聊天流无总时长（`Timeout=0` + 空闲监控） | `internal/upstream/client.go` `New()` + `internal/upstream/idle.go` `monitorBody` |
-| 5 | 三因子权重 `credits×10 + idle + successRate×3`（无记录 1.5） | `internal/pool/pool.go` `weightOf` |
-| 6 | 熔断 3 次 / 30m / 封顶 6h / `×2^retryCount` | `internal/pool/pool.go` `recordBreakerFailureLocked` |
-| 7 | 429/404/402 冷却入口喂 `fails` | `internal/pool/pool.go` `Cooldown` |
-| 8 | session 死亡（`12153` / `Offline user…`）→ 禁用 | `internal/upstream/client.go` `sessionDeadMarkers` |
-| 9 | 硬冷却至次日 04:00 | `internal/pool/pool.go` `CooldownUntilTomorrow4AM` |
-| 10 | 会话键顺序 | `internal/session/session.go` `ExtractKey` |
-| 11 | `/healthz` 用 `ServableNow` 判定 | `internal/server/handler.go` + `pool.go` |
-| 12 | 日志 stdout、uid 截 8 位、不含 token | `internal/server/logging.go` `logChatRow` |
-| 13 | `api_key` 非空才校验、空则放行 | `internal/server/handler.go` `withAuth` |
-| 14 | 上游 host 三值 | `internal/upstream/client.go` `New()` |
-| 15 | auth 文件 0600 原子写回 | `internal/auth/auth.go` `SaveAtomic` |
-| 16 | 容器 uid 10001 / EXPOSE 7863 / healthcheck | `Dockerfile` |
-| 17 | 挂载与端口映射 | `docker-compose.yml` |
-| 18 | OAuth 端点（`?platform=CLI` / `/auth/token` / `/login/account`） | `cmd/login/main.go` |
-| 19 | 动态模型缓存 1h + 负缓存 5min | `internal/server/handler.go` |
-| 20 | 请求体 8 MiB、`MaxRotate` 默认 3 | `internal/server/handler.go` |
-
-以上均为正文引用过的断言；如需复核更细细节，以 `config.example.json` 为配置样例、以 `.go` 源码为行为依据。

@@ -84,7 +84,9 @@ curl -s http://localhost:7863/v1/chat/completions \
     "keepalive_hours": [22]
   },
   "upstream": {
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
@@ -110,6 +112,16 @@ curl -s http://localhost:7863/v1/chat/completions \
 ```
 
 **注意**：`cooldown.hard_credit` / `cooldown.err_threshold` / `cooldown.err_cooldown` 三个历史键已退役。硬冷却固定为**次日 04:00**（本地时区，`CooldownUntilTomorrow4AM`），连续错误语义并入熔断器（`pool.breaker_threshold` 触发指数退避）。旧配置中的这些键因 JSON 未知字段被自然忽略，不报错。
+
+**upstream 超时语义**（三种超时各归其位，`timeout_seconds` 不再约束聊天流总时长）：
+
+| 字段 | 作用对象 | 默认 | 说明 |
+|---|---|---|---|
+| `timeout_seconds` | 短 RPC 总时长 | 120 | refresh/checkin/balance/FetchModels；到期报错走既有的换号/熔断 |
+| `header_timeout_seconds` | 聊天 SSE 首字节前（响应头） | 回落 `timeout_seconds` | 到期=`Do` err → 换号重发（原"首字节前换号"行为不变） |
+| `idle_timeout_seconds` | 聊天 SSE 流中空闲 | 300 | 活跃吐数据续命不掐；静默超过阈值才断流释放租约 |
+
+聊天流（`stream` 无论 true/false）**不再有总时长上限**，长思考模型（glm-5.3 类）超长回答不再被 120s 掐断。旧配置仅含 `timeout_seconds` 时完全兼容：header 回落该值、idle 走内置 300。
 
 ## 账号轮换与冷却策略
 

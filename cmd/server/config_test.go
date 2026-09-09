@@ -146,6 +146,71 @@ func TestBadBreakerCooldown(t *testing.T) {
 	}
 }
 
+func TestUpstreamTimeoutDefaults(t *testing.T) {
+	// 默认：header 回落 timeout，idle 回落 300。
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Upstream.TimeoutSeconds != 120 {
+		t.Errorf("timeout_seconds=%d want 120", c.Upstream.TimeoutSeconds)
+	}
+	if c.Upstream.HeaderTimeoutSeconds != 120 {
+		t.Errorf("header_timeout_seconds=%d want fallback 120", c.Upstream.HeaderTimeoutSeconds)
+	}
+	if c.Upstream.IdleTimeoutSeconds != 300 {
+		t.Errorf("idle_timeout_seconds=%d want fallback 300", c.Upstream.IdleTimeoutSeconds)
+	}
+}
+
+func TestUpstreamHeaderFallsBackToTimeout(t *testing.T) {
+	// 只设 timeout_seconds：header 回落同值，idle 回落 300。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"timeout_seconds":60}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.HeaderTimeoutSeconds != 60 {
+		t.Errorf("header_timeout_seconds=%d want fallback 60", c.Upstream.HeaderTimeoutSeconds)
+	}
+	if c.Upstream.IdleTimeoutSeconds != 300 {
+		t.Errorf("idle_timeout_seconds=%d want fallback 300", c.Upstream.IdleTimeoutSeconds)
+	}
+}
+
+func TestUpstreamExplicitHeaderIdle(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"timeout_seconds":120,"header_timeout_seconds":30,"idle_timeout_seconds":600}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.HeaderTimeoutSeconds != 30 {
+		t.Errorf("header_timeout_seconds=%d want 30", c.Upstream.HeaderTimeoutSeconds)
+	}
+	if c.Upstream.IdleTimeoutSeconds != 600 {
+		t.Errorf("idle_timeout_seconds=%d want 600", c.Upstream.IdleTimeoutSeconds)
+	}
+}
+
+func TestUpstreamEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_HEADER_TIMEOUT_SECONDS", "45")
+	t.Setenv("WB2A_IDLE_TIMEOUT_SECONDS", "900")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.HeaderTimeoutSeconds != 45 {
+		t.Errorf("header_timeout_seconds=%d want env 45", c.Upstream.HeaderTimeoutSeconds)
+	}
+	if c.Upstream.IdleTimeoutSeconds != 900 {
+		t.Errorf("idle_timeout_seconds=%d want env 900", c.Upstream.IdleTimeoutSeconds)
+	}
+}
+
 func TestBadSessionTTL(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

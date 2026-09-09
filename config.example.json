@@ -12,7 +12,9 @@
     "keepalive_hours": [22]
   },
   "upstream": {
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

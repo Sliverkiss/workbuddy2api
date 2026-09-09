@@ -275,21 +275,25 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	}
 	ChatHeaders(req, a)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
+		cancel()
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		cancel()
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
+	// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
+	// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
+	// ctx 无 deadline 无 goroutine，连接由 resp.Body.Close 正常清理。
 	return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 

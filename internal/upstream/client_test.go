@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +214,51 @@ func TestChatStreamHardCreditError(t *testing.T) {
 	// caller classifies via returned body
 	if Classify(status, string(respBody)) != ErrHardCredit {
 		t.Errorf("body=%q not classified hard credit", respBody)
+	}
+}
+
+// TestChatStreamReadsMultipleChunksOverRealTransport 走真实 net/http 传输层，
+// 回归 defer cancel() 导致第二块起 body Read 返回 context canceled 的断流 bug。
+func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
+	const frames = 6
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("http.ResponseWriter does not implement http.Flusher")
+			return
+		}
+		for i := 1; i <= frames; i++ {
+			if _, err := fmt.Fprintf(w, "data: chunk-%d\n\n", i); err != nil {
+				return
+			}
+			flusher.Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.ChatBaseCN = srv.URL
+	c.IdleTimeout = 5 * time.Second
+
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`))
+	if err != nil || status != 200 {
+		t.Fatalf("chat: status=%d err=%v", status, err)
+	}
+	defer rc.Close()
+
+	buf := make([]byte, 1)
+	var got string
+	for i := 0; i < frames; i++ {
+		if _, err := io.ReadFull(rc, buf); err != nil {
+			t.Fatalf("read %d: %v (real transport body must not be cut)", i, err)
+		}
+		got += string(buf)
+	}
+	if strings.Contains(got, "context canceled") {
+		t.Fatalf("body read hit context canceled, got %q", got)
 	}
 }
 

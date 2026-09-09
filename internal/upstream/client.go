@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -273,6 +274,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		return nil, 0, nil, err
 	}
 	ChatHeaders(req, a)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
@@ -286,7 +290,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。

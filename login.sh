@@ -111,10 +111,10 @@ PYEOF
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
 AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
 if [[ -f "$AUTH_FILE" ]]; then
-    echo "账号已存在（uid=$USER_ID），将覆盖更新凭证"
+    echo "账号已存在（uid=${USER_ID}），将覆盖更新凭证"
     ACTION="覆盖"
 else
-    echo "新账号（uid=$USER_ID），新增 auth 文件"
+    echo "新账号（uid=${USER_ID}），新增 auth 文件"
     ACTION="新增"
 fi
 python3 - <<PYEOF
@@ -135,7 +135,7 @@ auth = {
 }
 with open("$AUTH_FILE", "w") as f:
     json.dump(auth, f, indent=1)
-print(f"已保存（$ACTION）: $AUTH_FILE")
+print(f"已保存（${ACTION}）: $AUTH_FILE")
 PYEOF
 
 # ─── 重启服务 ────────────────────────────────────────────
@@ -144,6 +144,8 @@ if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     echo "重启 $CONTAINER 加载新账号..."
     docker restart "$CONTAINER" >/dev/null
     sleep 2
+    # API_KEY 从 config.json 读取（该变量在脚本中未定义，fallback 硬编码值会导致 401）
+    API_KEY=$(python3 -c "import json; print(json.load(open('config.json')).get('api_key',''))" 2>/dev/null)
     COUNT=$(curl -s http://127.0.0.1:7863/status -H "Authorization: Bearer ${API_KEY:-tistzach}" 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('accounts',[])))" 2>/dev/null || echo "?")
     echo "服务已重启，当前账号数: $COUNT"
 else

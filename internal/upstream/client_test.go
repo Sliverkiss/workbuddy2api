@@ -27,6 +27,21 @@ func TestClassify(t *testing.T) {
 		{200, `{"code":10001,"msg":"积分不足，请充值"}`, ErrHardCredit},
 		{400, `{"code":1,"msg":"额度用尽"}`, ErrHardCredit},
 		{429, ``, ErrSoftRate},
+		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
+		// 否则账号不会被冷却，下次请求仍会被选中。
+		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
+		{400, `rate limit`, ErrSoftRate},
+		{403, `usage limit reached`, ErrSoftRate},
+		// "model usage limit exceeded" 不是余额语义（无 credit/quota/积分/额度 等计费词），
+		// 属于模型侧用量节流 → 短冷却（误判为硬冷却会把有余量的号停到次日 04:00）。
+		{200, `{"code":1,"msg":"model usage limit exceeded"}`, ErrSoftRate},
+		{200, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
+		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
+		// 反向锚定：不得回归。
+		{400, `Illegal API invocation from an unapproved channel`, ErrClient},
+		{200, `quota exceeded`, ErrHardCredit},
+		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
+		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
 		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},

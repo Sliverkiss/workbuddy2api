@@ -15,8 +15,8 @@ func TestDefault(t *testing.T) {
 	if err := c.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	if c.SoftRateDur.Seconds() != 60 {
-		t.Errorf("soft=%v", c.SoftRateDur)
+	if c.SoftRateDur.Seconds() != 600 {
+		t.Errorf("soft=%v want 600s", c.SoftRateDur)
 	}
 }
 
@@ -88,6 +88,9 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if c.Pool.IdleWeightPerHour != 0.5 || c.Pool.IdleWeightMax != 5.0 {
 		t.Errorf("idle weights=%v/%v", c.Pool.IdleWeightPerHour, c.Pool.IdleWeightMax)
 	}
+	if c.SoftRateMaxDur.Hours() != 2 {
+		t.Errorf("soft_rate_max=%v want 2h", c.SoftRateMaxDur)
+	}
 	if !c.SessionSticky.Enabled {
 		t.Error("session_sticky.enabled want true")
 	}
@@ -135,6 +138,45 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 	}
 	if c.SessionTTL.Hours() != 1 || c.SessionGCInterval.Minutes() != 2 {
 		t.Errorf("session durations=%v/%v", c.SessionTTL, c.SessionGCInterval)
+	}
+}
+
+func TestSoftRateMaxParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"5m","soft_rate_max":"45m"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SoftRateDur.Minutes() != 5 {
+		t.Errorf("soft_rate=%v want 5m", c.SoftRateDur)
+	}
+	if c.SoftRateMaxDur.Minutes() != 45 {
+		t.Errorf("soft_rate_max=%v want 45m", c.SoftRateMaxDur)
+	}
+}
+
+func TestSoftRateMaxEmptyFallsBackToDefault(t *testing.T) {
+	// 键缺席 → Default() 的 2h 保留（空串无法 ParseDuration）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate":"90s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SoftRateMaxDur.Hours() != 2 {
+		t.Errorf("soft_rate_max=%v want 2h fallback", c.SoftRateMaxDur)
+	}
+}
+
+func TestBadSoftRateMax(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"cooldown":{"soft_rate_max":"oops"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for bad soft_rate_max")
 	}
 }
 

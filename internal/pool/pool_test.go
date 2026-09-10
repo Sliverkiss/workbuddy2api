@@ -660,6 +660,175 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 软冷却指数退避（softStreak）
+// ---------------------------------------------------------------------------
+
+// wantCoolSec 断言账号当前冷却剩余秒数 ≈ want（±tol 秒，容忍测试内的 tick 漂移）。
+func wantCoolSec(t *testing.T, p *Pool, uid string, want int64, tol int64) {
+	t.Helper()
+	st, ok := p.Status(uid)
+	if !ok {
+		t.Fatalf("status(%s) missing", uid)
+	}
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("%s should be in soft_rate cooling: %+v", uid, st)
+	}
+	if got := st.CoolRemaining; got < want-tol || got > want+tol {
+		t.Errorf("cool_remaining_sec=%d want ~%d (±%d)", got, want, tol)
+	}
+}
+
+func TestCooldownSoftExponentialBackoff(t *testing.T) {
+	// 同一账号连续软冷却 → 时长按 2 倍指数增长（不依赖真实等待，只看剩余时长）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(time.Hour) // 封顶 1h：本用例三步（600/1200/2400）都不触及
+
+	for i, want := range []int64{600, 1200, 2400} {
+		p.Cooldown("u1", CoolSoft, 600*time.Second, "429 rate limit")
+		wantCoolSec(t, p, "u1", want, 3)
+		if st, _ := p.Status("u1"); st.SoftStreak != i+1 {
+			t.Errorf("after call %d: soft_streak=%d want %d", i+1, st.SoftStreak, i+1)
+		}
+	}
+}
+
+func TestCooldownSoftCappedBySoftRateMax(t *testing.T) {
+	// 注入封顶：streak 3 的 400s 被压到 250s。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(250 * time.Second)
+
+	p.Cooldown("u1", CoolSoft, 100*time.Second, "x")
+	wantCoolSec(t, p, "u1", 100, 3)
+	p.Cooldown("u1", CoolSoft, 100*time.Second, "x")
+	wantCoolSec(t, p, "u1", 200, 3)
+	p.Cooldown("u1", CoolSoft, 100*time.Second, "x")
+	wantCoolSec(t, p, "u1", 250, 3)
+}
+
+func TestCooldownSoftDefaultCapWhenUnset(t *testing.T) {
+	// 未注入 softRateMax → 按 2h 封顶（避免裸用池时退避无上限）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	for i, want := range []int64{600, 1200, 2400, 4800, 7200} {
+		p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+		wantCoolSec(t, p, "u1", want, 3)
+		if st, _ := p.Status("u1"); st.SoftStreak != i+1 {
+			t.Errorf("soft_streak=%d want %d", st.SoftStreak, i+1)
+		}
+	}
+}
+
+func TestSetSoftRateMaxIgnoresNonPositive(t *testing.T) {
+	// 非正值保留原值（风格同 SetBreaker）：0 不应把封顶清零导致无上限。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(0)
+	p.SetSoftRateMax(-time.Second)
+	for i := 0; i < 6; i++ {
+		p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	}
+	wantCoolSec(t, p, "u1", 7200, 3) // 仍是 2h 封顶（第 6 步 19200s → 7200s）
+}
+
+func TestCooldownSoftStreakResetBySuccess(t *testing.T) {
+	// 成功即证明账号恢复 → streak 归零，下次软冷却回到基数。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p, "u1", 1200, 3)
+
+	p.NoteSuccess("u1")
+	if st, _ := p.Status("u1"); st.SoftStreak != 0 {
+		t.Fatalf("success should reset soft_streak, got %d", st.SoftStreak)
+	}
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p, "u1", 600, 3)
+}
+
+func TestCooldownSoftStreakResetByReenable(t *testing.T) {
+	// 签到解冻（reviveCoolingLocked）清 cooling 域 → softStreak 一并归零；
+	// 熔断域（fails/retryCount/breakerUntil）不动，与既有 C5 语义一致。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	failsBefore := p.breakerFails("u1")
+
+	p.ReenableIfCredits("u1", 500)
+	st, _ := p.Status("u1")
+	if st.SoftStreak != 0 {
+		t.Errorf("reenable should reset soft_streak, got %d", st.SoftStreak)
+	}
+	if st.Cooling {
+		t.Errorf("reenable should clear cooling: %+v", st)
+	}
+	if failsAfter := p.breakerFails("u1"); failsAfter != failsBefore {
+		t.Errorf("reenable must not touch breaker: fails %d → %d", failsBefore, failsAfter)
+	}
+
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p, "u1", 600, 3)
+}
+
+func TestCooldownHardDoesNotAdvanceSoftStreak(t *testing.T) {
+	// 硬冷却（余额耗尽）时长由签到时点决定，不参与软退避指数。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	if st, _ := p.Status("u1"); st.SoftStreak != 0 {
+		t.Fatalf("hard cooldown must not touch soft_streak, got %d", st.SoftStreak)
+	}
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p, "u1", 600, 3)
+}
+
+func TestSoftStreakPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	p.Flush()
+
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"soft_streak"`) {
+		t.Fatalf("state.json missing soft_streak:\n%s", raw)
+	}
+
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if st, _ := p2.Status("u1"); st.SoftStreak != 2 {
+		t.Fatalf("soft_streak after reload=%d want 2", st.SoftStreak)
+	}
+	// 退避从持久化的 streak 继续：第 3 次 → 2400s。
+	p2.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p2, "u1", 2400, 3)
+}
+
+func TestSoftStreakMissingInLegacyStateFile(t *testing.T) {
+	// 旧 state.json 无 soft_streak → 零值兼容，退避从基数重新开始。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(fp, []byte(`{"accounts":{"u1":{"credits":100}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	if st, _ := p.Status("u1"); st.SoftStreak != 0 {
+		t.Fatalf("legacy file should load soft_streak=0, got %d", st.SoftStreak)
+	}
+	p.Cooldown("u1", CoolSoft, 600*time.Second, "x")
+	wantCoolSec(t, p, "u1", 600, 3)
+}
+
 func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})
@@ -798,6 +967,13 @@ func (p *Pool) breakerUntil(uid string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return e.breakerUntil, true
+}
+
+// breakerFails 曝露 entry.fails 供测试断言（包内私有 helper）。
+func (p *Pool) breakerFails(uid string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.byUID[uid].fails
 }
 
 // internalHealthy 曝露 entry.healthy 供测试断言（包内私有 helper）。

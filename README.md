@@ -36,7 +36,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🔄 **多账号池** | 三因子加权随机选号（积分比例 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
 | 🛡️ **熔断与冷却** | 429/404 软冷却、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑 |
-| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻；22:00 全账号 token 刷新保活 |
+| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻；22:00 全账号 token 刷新保活；每 30 分钟猫猫旅行巡检 |
 | ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 可接负载均衡 |
@@ -54,7 +54,7 @@ flowchart LR
         H --> S
         P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 保活 22"] --> P
+        T["定时调度\n签到 09/21 · 保活 22 · 旅行 30m"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
     end
 
@@ -141,7 +141,7 @@ curl -s http://localhost:7863/v1/chat/completions \
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "cooldown": { "soft_rate": "60s" },
-  "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22] },
+  "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22], "travel_interval_minutes": 30 },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
@@ -172,6 +172,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `cooldown.soft_rate` | `60s` | 429/404 软冷却时长 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询 |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
+| `schedule.travel_interval_minutes` | `30` | 猫猫旅行巡检间隔（分钟）；**`0` = 禁用** |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
@@ -201,7 +202,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool）
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_TRAVEL_INTERVAL_MINUTES` · `WB2A_SANITIZE_FINGERPRINTS`（bool）
 
 ## 🧠 账号池与流量治理
 
@@ -262,8 +263,32 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | 签到 | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
 | 保活 | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
+| 猫猫旅行 | `travel_interval_minutes` 默认 `30` 分钟 | 逐账号单趟推进旅行状态机（领养 / 派出 / 领奖） |
 
 容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+
+#### 猫猫旅行巡检
+
+对池内每个可用账号**每 30 分钟单趟推进一次**（近似整点刻度：0:00 / 0:30 / 1:00 …），
+每趟只做一个动作，不轮询不等待：
+
+| 探测结果 | 动作 |
+|---|---|
+| 无猫（`buddy` 为 `null`） | 先同意协议（幂等），再尝试领养；过门槛则 +300 积分并获得猫 |
+| `state=idle` 且今日未派出 | 派出 `location_id=4`（古镇客栈；4 个地点收益/时长区间相同，无最优解） |
+| `state=arrived` | 领取到站奖励（带 `record_id`） |
+| `state=traveling` / 今日已达上限 / 未知状态 | 跳过 |
+
+- **领养门槛**：conversation 门槛未达标时上游返回 HTTP 400 `first_buddy task not completed yet`，
+  属预期行为——**每账号每自然日只尝试一次**，失败后当日静默跳过，跨日（00:00 CST）自动重试；
+  记录仅存内存，进程重启后清零。
+- **限速**：账号间间隔 800ms（46 个账号约 40s），避免触发上游风控。
+- **每自然日 1 次派出**：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关。
+- **失败隔离**：单个账号查询/动作失败只跳过该账号本轮，不中断其他账号；401 不做强刷
+  （token 刷新交 22:00 保活），失败信息按 `travel <uid>: <动作>: <错误>` 落日志。
+- **关闭**：`schedule.travel_interval_minutes` 设为 `0` 即完全禁用（不排程、无 goroutine）。
+
+同一时刻既是整点签到又是旅行刻度（如 21:00）时，两类任务都会执行。
 
 ## 🔌 API 端点
 
@@ -387,7 +412,7 @@ cmd/
 internal/
   auth/      # 凭证解析 + token 刷新 + 原子写回
   pool/      # 账号池（状态机/熔断/租约/加权/持久化）
-  scheduler/ # 定时签到 + 保活
+  scheduler/ # 定时签到 + 保活 + 猫猫旅行巡检
   server/    # HTTP handler + 鉴权 + 请求日志
   session/   # 会话粘性路由
   upstream/  # 上游封装（chat/billing/auth/headers/sse/payload/sanitize/idle）

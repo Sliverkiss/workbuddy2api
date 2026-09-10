@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -222,6 +223,127 @@ func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	}
 	if len(c.Schedule.CheckinHours) != 1 || c.Schedule.CheckinHours[0] != 9 {
 		t.Errorf("checkin_hours=%v want [9]（同段其余键照常生效）", c.Schedule.CheckinHours)
+	}
+}
+
+// TestScheduleEnabledByDefault 两个任务的 enabled 开关默认均为 true：
+// 老 config 不写这两个键，行为必须与从前完全一致（照常 9/21 签到、22 保活）。
+func TestScheduleEnabledByDefault(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
+		t.Errorf("enabled defaults want true/true, got %v/%v",
+			c.Schedule.CheckinEnabled, c.Schedule.KeepaliveEnabled)
+	}
+}
+
+// TestScheduleLegacyConfigKeepsRunning 老 config（只写小时数组）加载后仍是启用态。
+func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_hours":[9,21],"keepalive_hours":[22]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
+		t.Errorf("legacy config must stay enabled: %+v", c.Schedule)
+	}
+	if len(c.Schedule.CheckinHours) != 2 {
+		t.Errorf("checkin_hours=%v", c.Schedule.CheckinHours)
+	}
+}
+
+// TestScheduleExplicitDisable 显式 checkin_enabled=false 即可真正关掉签到
+// （issue #27 边界：此前无论怎么配小时都关不掉）。
+func TestScheduleExplicitDisable(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_enabled":false,"keepalive_enabled":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.CheckinEnabled || c.Schedule.KeepaliveEnabled {
+		t.Errorf("want both disabled: %+v", c.Schedule)
+	}
+	// 小时数组仍回落默认值（禁用与默认值互不干扰：重新启用无需补配小时）。
+	if len(c.Schedule.CheckinHours) != 2 || c.Schedule.CheckinHours[0] != 9 || c.Schedule.CheckinHours[1] != 21 {
+		t.Errorf("checkin_hours=%v want default [9 21] even when disabled", c.Schedule.CheckinHours)
+	}
+	if len(c.Schedule.KeepaliveHours) != 1 || c.Schedule.KeepaliveHours[0] != 22 {
+		t.Errorf("keepalive_hours=%v want default [22] even when disabled", c.Schedule.KeepaliveHours)
+	}
+}
+
+// TestScheduleDisableKeepsExplicitHours 禁用不擦除用户配置的小时（便于原样恢复）。
+func TestScheduleDisableKeepsExplicitHours(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_enabled":false,"checkin_hours":[10,14]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.CheckinEnabled {
+		t.Error("checkin should be disabled")
+	}
+	if len(c.Schedule.CheckinHours) != 2 || c.Schedule.CheckinHours[0] != 10 || c.Schedule.CheckinHours[1] != 14 {
+		t.Errorf("explicit hours must be preserved: %v", c.Schedule.CheckinHours)
+	}
+}
+
+// TestScheduleEmptyHoursFallsBackToDefault 空数组 / null / 缺省都视同「未配置」→ 回落默认。
+func TestScheduleEmptyHoursFallsBackToDefault(t *testing.T) {
+	cases := map[string]string{
+		"absent":   `{}`,
+		"empty":    `{"schedule":{}}`,
+		"null":     `{"schedule":{"checkin_hours":null,"keepalive_hours":null}}`,
+		"emptyarr": `{"schedule":{"checkin_hours":[],"keepalive_hours":[]}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "c.json")
+			os.WriteFile(fp, []byte(body), 0o600)
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Schedule.CheckinHours) != 2 || c.Schedule.CheckinHours[0] != 9 || c.Schedule.CheckinHours[1] != 21 {
+				t.Errorf("checkin_hours=%v want default [9 21]", c.Schedule.CheckinHours)
+			}
+			if len(c.Schedule.KeepaliveHours) != 1 || c.Schedule.KeepaliveHours[0] != 22 {
+				t.Errorf("keepalive_hours=%v want default [22]", c.Schedule.KeepaliveHours)
+			}
+			if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
+				t.Errorf("empty hours must not imply disabled: %+v", c.Schedule)
+			}
+		})
+	}
+}
+
+// TestScheduleInvalidHourRejected 非法小时快速失败：指向正确的禁用开关，避免用户
+// 猜测哨兵值（[-1] 之类）被静默当成"改到别的整点"。
+func TestScheduleInvalidHourRejected(t *testing.T) {
+	cases := []struct{ body, wantSwitch string }{
+		{`{"schedule":{"checkin_hours":[25]}}`, "checkin_enabled"},
+		{`{"schedule":{"checkin_hours":[-1]}}`, "checkin_enabled"},
+		{`{"schedule":{"keepalive_hours":[-1]}}`, "keepalive_enabled"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		os.WriteFile(fp, []byte(tc.body), 0o600)
+		_, err := Load(fp)
+		if err == nil {
+			t.Fatalf("want error for %s", tc.body)
+		}
+		if !strings.Contains(err.Error(), tc.wantSwitch) {
+			t.Errorf("error for %s should point at schedule.%s: %v", tc.body, tc.wantSwitch, err)
+		}
 	}
 }
 

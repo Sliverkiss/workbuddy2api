@@ -27,6 +27,16 @@ type Config struct {
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
+		// CheckinEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
+		//
+		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
+		//   - 空数组与 null 在老语义里已被"未配置 → 回落默认"占用，改判会静默翻转
+		//     所有老 config 的行为（用户只想删掉一行，结果关掉了签到）；bool 缺省 true
+		//     则对老配置零影响，向后完全兼容。
+		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
+		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
+		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到（旅行随之停）
+		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		// 猫猫旅行已退役 travel_interval_minutes：派猫合并到签到时点执行（见 scheduler.RunCheckinNow）。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 	} `json:"schedule"`
@@ -84,6 +94,10 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
+	// 开关「缺省 true」靠这两行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
+	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
+	c.Schedule.CheckinEnabled = true
+	c.Schedule.KeepaliveEnabled = true
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -197,6 +211,38 @@ func (c *Config) normalize() error {
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
+	}
+	// 空数组与 null 反序列化后覆盖掉 Default() 的排程值（键缺席才保留），在此补齐。
+	// 空 = 未配置 → 回落默认；「禁用」一律走 *_enabled=false，两者互不混淆。
+	if len(c.Schedule.CheckinHours) == 0 {
+		c.Schedule.CheckinHours = []int{9, 21}
+	}
+	if len(c.Schedule.KeepaliveHours) == 0 {
+		c.Schedule.KeepaliveHours = []int{22}
+	}
+	if err := c.validateScheduleHours(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateScheduleHours 校验排程小时落在 0-23。
+//
+// 为什么不用 `[-1]` 之类的哨兵值表意"禁用"：非法小时被静默吞掉时，用户以为关掉了签到，
+// 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
+// （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
+func (c *Config) validateScheduleHours() error {
+	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", c.Schedule.CheckinHours); err != nil {
+		return err
+	}
+	return checkHourRange("schedule.keepalive_hours", "keepalive_enabled", c.Schedule.KeepaliveHours)
+}
+
+func checkHourRange(field, switchKey string, hours []int) error {
+	for _, h := range hours {
+		if h < 0 || h > 23 {
+			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)
+		}
 	}
 	return nil
 }

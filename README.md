@@ -142,7 +142,12 @@ curl -s http://localhost:7863/v1/chat/completions \
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "cooldown": { "soft_rate": "60s" },
-  "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22] },
+  "schedule": {
+    "checkin_hours": [9, 21],
+    "keepalive_hours": [22],
+    "checkin_enabled": true,
+    "keepalive_enabled": true
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
@@ -171,8 +176,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `cooldown.soft_rate` | `60s` | 429/404 软冷却时长 |
-| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询；收尾顺带跑一趟猫猫旅行 |
-| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
+| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询；收尾顺带跑一趟猫猫旅行。**空数组/`null` = 未配置回落默认**（不是禁用） |
+| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活。空数组/`null` 同上 |
+| `schedule.checkin_enabled` | `true` | 签到**总开关**；`false` 真正关掉签到（**猫猫旅行随之停摆**，见下） |
+| `schedule.keepalive_enabled` | `true` | token 保活总开关；`false` 关掉保活 |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
@@ -259,12 +266,43 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 定时任务
 
-| 任务 | 时刻（本地时区） | 行为 |
-|---|---|---|
-| 签到 | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号；**收尾顺带跑一趟猫猫旅行** |
-| 保活 | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
+| 任务 | 开关 | 时刻（本地时区） | 行为 |
+|---|---|---|---|
+| 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号；**收尾顺带跑一趟猫猫旅行** |
+| 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
 
 容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+
+#### 关闭定时任务
+
+用 `schedule.checkin_enabled` / `schedule.keepalive_enabled` 显式关闭，两者互相独立：
+
+```json
+"schedule": {
+  "checkin_hours": [9, 21],
+  "keepalive_hours": [22],
+  "checkin_enabled": false,
+  "keepalive_enabled": true
+}
+```
+
+上例：**只关签到，保活照常 22:00 跑**。两个都设 `false` 则调度器无任何时点可等，
+`Run` 不空转、直接阻塞等待退出信号（不会忙等空烧 CPU）。
+
+几条必须知道的语义：
+
+- **为什么用独立开关，而不是把小时数组留空**：空数组与 `null` 在本项目里一贯表示
+  **「未配置 → 回落默认」**（`[9, 21]` / `[22]`），不是「禁用」。沿用该语义可保证
+  老 config 行为逐字不变；真正关闭请用 `*_enabled: false`。
+- **关签到 = 猫猫旅行也停**：旅行没有独立开关，它搭签到时点便车执行（见下节）。
+  想让旅行继续跑就不能关签到——如需保留旅行请把 `checkin_hours` 调成你想要的时点。
+- **禁用不会擦除小时配置**：`checkin_hours` 原样保留，改回 `true` 即恢复原时点，无需补配。
+- **小时值必须是 0-23**：写了 `-1`、`25` 之类的非法值会在启动时**直接报错**并提示改用
+  开关（不做静默兜底，避免你以为关掉了、实际却在别的整点照常执行）。
+- 开关只影响**本进程的定时排程**，不改变池内冷却/熔断/禁用等既有状态机行为；
+  独立的一次性工具（`signin.sh` / `cmd/signin`）是另一个进程，不受本开关约束。
+- **关签到的连带影响**：签到的余额查询会「余额恢复即解冻」被硬冷却的账号（402 余额不足），
+  关掉后这类账号只能等硬冷却**次日 04:00 自然到期**才回到池中——当日余额回补不再提前解冻。
 
 #### 猫猫旅行（随签到时点合并执行）
 
@@ -290,7 +328,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **每自然日 1 次派出**：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关。
 - **失败隔离**：单个账号查询/动作失败只跳过该账号本轮，不中断其他账号；401 不做强刷
   （token 刷新交 22:00 保活），失败信息按 `travel <uid>: <动作>: <错误>` 落日志。
-- **关闭**：旅行已无独立开关——它随签到一起跑，不再单独排程。
+- **关闭**：旅行无独立开关——它随签到一起跑，不再单独排程。
+  因此 **`schedule.checkin_enabled: false` 关掉签到的同时，旅行也一并停摆**；
+  只想调整时点（而非关闭）请改 `checkin_hours`。
 
 签到与保活配到同一小时（如都含 22 点）时，两类任务都会执行。
 

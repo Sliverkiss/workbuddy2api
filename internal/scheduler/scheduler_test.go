@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -81,6 +82,85 @@ func TestNextWakeNothingScheduled(t *testing.T) {
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
 		t.Errorf("at=%v kinds=%v want zero/nil", at, kinds)
+	}
+}
+
+// TestNextWakeCheckinDisabled 显式禁用签到后，排程里不再有签到时点（保活照常）。
+func TestNextWakeCheckinDisabled(t *testing.T) {
+	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v（不应再有 21 点签到）", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskKeepalive {
+		t.Errorf("kinds=%v want [keepalive]", kinds)
+	}
+}
+
+// TestNextWakeKeepaliveDisabled 显式禁用保活后，排程里不再有保活时点（签到照常）。
+func TestNextWakeKeepaliveDisabled(t *testing.T) {
+	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v（不应再有 22 点保活）", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskCheckin {
+		t.Errorf("kinds=%v want [checkin]", kinds)
+	}
+}
+
+// TestNextWakeBothDisabledNothingScheduled 两类任务都显式禁用 → 无可唤醒时点。
+func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
+	s := New(Config{
+		CheckinDisabled:   true,
+		KeepaliveDisabled: true,
+		CheckinHours:      []int{9, 21},
+		KeepaliveHours:    []int{22},
+	})
+	at, kinds := s.nextWake(time.Now())
+	if !at.IsZero() || len(kinds) != 0 {
+		t.Errorf("at=%v kinds=%v want zero/nil", at, kinds)
+	}
+}
+
+// TestRunAllDisabledNoSpinNoCalls 两类任务全禁用：Run 不空转（只等退出信号），
+// 且不能触发任何上游请求——签到禁用同时意味着搭便车的猫猫旅行也停。
+func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "no upstream call expected", 404)
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
+	}
+	s := New(Config{
+		Pool:              p,
+		Upstream:          up,
+		CheckinDisabled:   true,
+		KeepaliveDisabled: true,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	s.Run(ctx) // 阻塞到 ctx 取消为止（无时点可等，不构造 timer）
+	elapsed := time.Since(start)
+
+	if calls.Load() != 0 {
+		t.Errorf("upstream calls=%d want 0（签到禁用 → 旅行也不跑）", calls.Load())
+	}
+	if elapsed < 200*time.Millisecond {
+		t.Errorf("Run returned after %v, before ctx done（不应提前返回）", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Run took %v（不应空转/忙等）", elapsed)
 	}
 }
 

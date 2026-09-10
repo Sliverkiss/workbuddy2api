@@ -93,12 +93,24 @@ func main() {
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 
 	sch := scheduler.New(scheduler.Config{
-		Pool:           p,
-		Upstream:       up,
-		CheckinHours:   cfg.Schedule.CheckinHours,
-		KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		Pool:              p,
+		Upstream:          up,
+		CheckinHours:      cfg.Schedule.CheckinHours,
+		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
+		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
+		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
 	})
-	log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励（%v 点）", cfg.Schedule.CheckinHours)
+	switch {
+	case !cfg.Schedule.CheckinEnabled:
+		log.Printf("签到已禁用（schedule.checkin_enabled=false）：猫猫旅行同时停摆（搭签到便车）")
+	case len(cfg.Schedule.CheckinHours) == 0:
+		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励")
+	default:
+		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励（%v 点）", cfg.Schedule.CheckinHours)
+	}
+	if !cfg.Schedule.KeepaliveEnabled {
+		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
+	}
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,

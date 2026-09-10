@@ -8,7 +8,9 @@
   },
   "schedule": {
     "checkin_hours": [9, 21],
-    "keepalive_hours": [22]
+    "keepalive_hours": [22],
+    "checkin_enabled": true,
+    "keepalive_enabled": true
   },
   "upstream": {
     "timeout_seconds": 120,

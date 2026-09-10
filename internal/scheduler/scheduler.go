@@ -14,11 +14,20 @@ import (
 )
 
 // Config 调度器依赖。
+//
+// 任务开关用「禁用」命名而非「启用」：零值 Config 即两类任务都启用，
+// 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
 	Pool           *pool.Pool
 	Upstream       *upstream.Client
 	CheckinHours   []int // 默认 [9, 21]
 	KeepaliveHours []int // 默认 [22]
+
+	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
+	// 禁用后不再有任何签到时点，搭签到便车的猫猫旅行也随之停摆。
+	CheckinDisabled bool
+	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
+	KeepaliveDisabled bool
 }
 
 // Scheduler 调度器。
@@ -67,14 +76,18 @@ const (
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 签到与保活若配到同一小时（如都含 22），该时刻两类任务需一并执行。
+// 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	type slot struct {
 		at   time.Time
 		kind taskKind
 	}
-	slots := []slot{
-		{nextFire(now, s.cfg.CheckinHours), taskCheckin},
-		{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive},
+	var slots []slot
+	if !s.cfg.CheckinDisabled {
+		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours), taskCheckin})
+	}
+	if !s.cfg.KeepaliveDisabled {
+		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
 	}
 	var earliest time.Time
 	for _, sl := range slots {

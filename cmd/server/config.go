@@ -27,9 +27,8 @@ type Config struct {
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		// TravelIntervalMinutes 猫猫旅行巡检间隔（分钟），默认 30，0 = 禁用（不启动巡检）。
-		// 缺省与显式 0 语义不同，故不走"0 即回落默认"的通用规则（见 normalize）。
-		TravelIntervalMinutes int `json:"travel_interval_minutes"`
+		// 猫猫旅行已退役 travel_interval_minutes：派猫合并到签到时点执行（见 scheduler.RunCheckinNow）。
+		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -85,7 +84,6 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
-	c.Schedule.TravelIntervalMinutes = 30
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -153,12 +151,6 @@ func applyEnv(c *Config) {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_TRAVEL_INTERVAL_MINUTES"); v != "" {
-		// 显式 0 表示禁用，故用"变量非空"而非"值非零"判定。
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Schedule.TravelIntervalMinutes = n
-		}
-	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -191,11 +183,6 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.IdleWeightMax <= 0 {
 		c.Pool.IdleWeightMax = 5.0
-	}
-	// 旅行巡检间隔：Default 已给 30，JSON/env 只在显式出现时覆盖（故"缺省"与"显式 0=禁用"
-	// 可区分，不做 0→默认 的回落）。负值无意义，归一为禁用。
-	if c.Schedule.TravelIntervalMinutes < 0 {
-		c.Schedule.TravelIntervalMinutes = 0
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

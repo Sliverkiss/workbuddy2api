@@ -425,4 +425,8 @@ internal/
 
 ## License
 
-本仓库未包含 LICENSE 文件。如需使用或再分发，请向仓库所有者确认授权条款。
+本项目采用 [MIT License](LICENSE) 开源协议。
+
+- 允许任意使用、复制、修改、合并、发布、分发、再授权及销售
+- 再分发（源码或二进制形式，包括内嵌编译产物的整合项目）时，请保留原仓库的 MIT 版权声明与许可声明（如在 NOTICE 或 README 中注明原始出处 `https://github.com/Sliverkiss/workbuddy2api`，我们将不胜感激）
+- 本项目不授予任何上游（CodeBuddy / 腾讯）接口或服务的权利；使用者仍需自行遵守上游服务条款（见上方免责声明）

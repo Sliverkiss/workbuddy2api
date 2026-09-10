@@ -193,6 +193,58 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	}
 }
 
+// TestChatSoftCoolsOnRateLimitBody 端到端回归 issue #28：上游用非 429 状态码
+// （400 + 限流文案）表达模型侧限流时，该账号必须进入 CoolSoft 冷却，而不是只换号。
+// 修复前 Classify 归 ErrClient → applyErrorPolicy 走 default 分支只换号不罚，
+// 账号留在可用池里，下一个请求仍会被选中。
+func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		if authz == "Bearer at-bad" {
+			return 400, `{"code":1,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// 让 bad 积分更高被先选中（与 TestChatRotatesOnHardCredit 同一确定性手法）。
+	p.SetCredits("bad", 2000)
+	p.SetCredits("good", 1000)
+	const soft = 45 * time.Second
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: soft})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
+		t.Errorf("calls=%v want bad/good 各 1 次", calls)
+	}
+	st, _ := p.Status("bad")
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
+	}
+	// 冷却时长取自注入的 SoftCooldown，不依赖真实等待。
+	if max := int64(soft / time.Second); st.CoolRemaining <= 0 || st.CoolRemaining > max {
+		t.Errorf("cool_remaining_sec=%d want in (0,%d]", st.CoolRemaining, max)
+	}
+
+	// 冷却生效：同一账号在冷却期内不得再被选中。
+	before := calls["Bearer at-bad"]
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec2.Code != 200 {
+		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
+	}
+	if calls["Bearer at-bad"] != before {
+		t.Errorf("冷却中的账号不应再次被选中: calls=%v", calls)
+	}
+}
+
 // TestChatStickyFollowsFinalSuccess 端到端验证 D4：粘性号失败换号成功后，会话绑定收敛到成功号。
 func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	st := newBindStore()

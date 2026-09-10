@@ -39,7 +39,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活 |
 | ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
-| 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 可接负载均衡 |
+| 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
 
@@ -106,8 +106,9 @@ docker compose up -d --build
 ### 4. 验证
 
 ```bash
-# 健康检查（无可用账号时 503）
+# 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
 curl -s http://localhost:7863/healthz
+# {"healthy":2,"total":3,"service":"workbuddy2api"}
 
 # 模型列表
 curl -s http://localhost:7863/v1/models \
@@ -312,6 +313,42 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上
 可能残留的其他服务——后者即使返回 2xx 也不会带该字段/头，宿主探测据此避免"假成功"。
+
+### 宿主健康探测指引
+
+宿主程序（如 workbuddy-switch 托管网关子进程）探活时，**"端口通 + 返回 2xx" 不足以
+证明打到了自己的网关**：同端口可能残留旧版本进程或别的服务，对方返回 2xx 会造成假成功。
+按校验强度从高到低有两种做法：
+
+**① 强校验（推荐）：`/status` + `api_key`**
+
+```bash
+# 期望 200；若返回 401 则说明对面的 /status 不认这个 api_key —— 不是自己的网关
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer <api_key>" \
+  http://127.0.0.1:7863/status
+```
+
+`/status` 挂在鉴权中间件上：只有持有正确 `api_key` 的本网关才会返回 200，旧服务/其他服务
+只会返回 401（或 404）。**注意前提**：本网关 `api_key` 非空才具备这个判别力；
+`api_key` 为空时 `/status` 直接放行，退化为弱校验。
+
+宿主判定建议：`200` → 健康；`401` → 不是自己的网关（端口被占）；连接失败 → 未就绪；
+`5xx` → 网关已就位但池不可服务（可再叠加 `/healthz` 的 503 语义）。
+
+**② 弱校验（无凭据场景）：`/healthz` + `service` 字段**
+
+```bash
+# 必须同时校验 service 字段；只判断 HTTP 状态码仍可能假成功
+curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
+```
+
+适合负载均衡器 / 容器编排这类**不该持有 api_key** 的探活方（`/healthz` 恒无鉴权，
+200=可服务、503=池内无可服务账号）。判据是响应体 `service == "workbuddy2api"`；
+响应头 `X-Service` 可用于只读头部的探活实现。若对面返回 2xx 但缺该标识 → 判为异常。
+
+> 容器自带的 `HEALTHCHECK` 用的就是 ②（仅进程内自检，够用）；
+> 宿主做**跨进程归属确认**时用 ①。
 
 ### 流式行为细节
 

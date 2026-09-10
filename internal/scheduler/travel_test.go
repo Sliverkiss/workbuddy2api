@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,8 +27,8 @@ type travelStub struct {
 	location, record                    atomic.Int64
 }
 
-func (s *travelStub) server() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (s *travelStub) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/activity/growth/buddy/info":
 			s.infoCalls.Add(1)
@@ -65,6 +66,28 @@ func (s *travelStub) server() *httptest.Server {
 		default:
 			http.Error(w, "not found", 404)
 		}
+	})
+}
+
+func (s *travelStub) server() *httptest.Server {
+	return httptest.NewServer(s.handler())
+}
+
+// billingAndGrowthServer 同时模拟 billing（签到/余额/刷新）与 growth（旅行）端点，
+// 供「签到收尾顺带跑旅行」这类跨域用例使用。
+func billingAndGrowthServer(stub *travelStub) *httptest.Server {
+	growth := stub.handler()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":500,"CycleCapacityUsed":0}]}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
+			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+		default:
+			growth.ServeHTTP(w, r)
+		}
 	}))
 }
 
@@ -76,7 +99,7 @@ func fastTravel(t *testing.T) {
 	t.Cleanup(func() { travelAccountDelay = old })
 }
 
-// newTravelScheduler 构造只含 travel 依赖的调度器（签到/保活不参与）。
+// newTravelScheduler 构造 travel 相关依赖齐全的调度器。
 func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Scheduler, *pool.Pool) {
 	t.Helper()
 	p := pool.New("")
@@ -84,7 +107,65 @@ func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Sc
 		p.Add(&auth.Auth{UID: uid, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	}
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	return New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}, TravelMinutes: 30}), p
+	return New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}}), p
+}
+
+// TestRunCheckinNowTriggersTravel 签到收尾顺带跑一趟旅行（无猫 → 同意协议 + 领养）。
+func TestRunCheckinNowTriggersTravel(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := billingAndGrowthServer(stub)
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunCheckinNow()
+
+	if n := stub.infoCalls.Load(); n != 1 {
+		t.Errorf("buddy/info calls=%d want 1（签到收尾应顺带跑一趟旅行）", n)
+	}
+	if n := stub.firstCalls.Load(); n != 1 {
+		t.Errorf("buddy/first calls=%d want 1（无猫应尝试领养）", n)
+	}
+	if n := stub.agreeCalls.Load(); n != 1 {
+		t.Errorf("buddy/agreement calls=%d want 1", n)
+	}
+}
+
+// TestRunCheckinTravelCoversAccountsJustReenabled 签到解冻的账号当轮即参与旅行。
+func TestRunCheckinTravelCoversAccountsJustReenabled(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`,
+		state: `{"state":"idle","daily_limit_reached":false}`}
+	srv := billingAndGrowthServer(stub)
+	defer srv.Close()
+
+	s, p := newTravelScheduler(t, srv, "u1")
+	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
+
+	s.RunCheckinNow()
+
+	// 签到查到余额 500 解冻 → 收尾的旅行覆盖到该账号并派出。
+	if n := stub.departCalls.Load(); n != 1 {
+		t.Errorf("depart calls=%d want 1（刚解冻账号应被本轮旅行覆盖）", n)
+	}
+}
+
+// TestRunKeepaliveDoesNotTriggerTravel 22 点保活不触发旅行：旅行只搭签到便车。
+func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := billingAndGrowthServer(stub)
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunKeepaliveNow()
+
+	if n := stub.infoCalls.Load(); n != 0 {
+		t.Errorf("buddy/info calls=%d want 0（保活不触发旅行）", n)
+	}
+	if n := stub.firstCalls.Load(); n != 0 {
+		t.Errorf("buddy/first calls=%d want 0", n)
+	}
 }
 
 // TestRunTravelStateMachine 表驱动覆盖状态机全部分支：每趟只做一个动作。
@@ -349,9 +430,9 @@ func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 	}
 }
 
-// TestRunTravelLoopCancelsWhenDisabled 三类任务全禁用时 Run 不空转，ctx 取消即返回。
+// TestRunTravelLoopCancelsWhenDisabled 无任何整点任务时 Run 不空转，ctx 取消即返回。
 func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
-	s := &Scheduler{cfg: Config{TravelMinutes: 0}, adoptTried: map[string]string{}}
+	s := &Scheduler{cfg: Config{}, adoptTried: map[string]string{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()
@@ -365,7 +446,7 @@ func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
 
 // TestRunTravelLoopStopsOnCancel 有排程在等计时器时 ctx 取消应立即退出。
 func TestRunTravelLoopStopsOnCancel(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}, TravelMinutes: 30})
+	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()

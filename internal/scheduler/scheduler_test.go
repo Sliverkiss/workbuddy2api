@@ -42,65 +42,9 @@ func TestNextFireMergesSchedules(t *testing.T) {
 	}
 }
 
-// TestNextTravelFire 分钟粒度巡检的下一次触发：按自然日对齐间隔整数倍，严格大于 now。
-func TestNextTravelFire(t *testing.T) {
-	loc := time.Local
-	at := func(h, m int) time.Time { return time.Date(2026, 9, 11, h, m, 0, 0, loc) }
-	cases := []struct {
-		name     string
-		now      time.Time
-		interval int
-		want     time.Time
-	}{
-		{"整点刻度顺延一节", at(10, 0), 30, at(10, 30)},
-		{"刻度之间取下一刻度", at(10, 7), 30, at(10, 30)},
-		{"恰在刻度上不重复触发", at(10, 30), 30, at(11, 0)},
-		{"15 分钟粒度", at(10, 1), 15, at(10, 15)},
-		{"非整除 60 的间隔", at(10, 0), 45, at(10, 30)}, // 刻度自 0 点起算：…9:45 → 10:30
-		{"非整除间隔的刻度间", at(10, 31), 45, at(11, 15)},
-		{"跨自然日顺延", at(23, 50), 30, time.Date(2026, 9, 12, 0, 0, 0, 0, loc)},
-		{"间隔大于剩余时长跨日", at(23, 0), 120, time.Date(2026, 9, 12, 0, 0, 0, 0, loc)},
-	}
-	for _, c := range cases {
-		if got := nextTravelFire(c.now, c.interval); !got.Equal(c.want) {
-			t.Errorf("%s: next=%v want %v", c.name, got, c.want)
-		}
-	}
-	// 0 / 负值 = 禁用：返回零值，调用方不排程。
-	for _, iv := range []int{0, -30} {
-		if got := nextTravelFire(at(10, 0), iv); !got.IsZero() {
-			t.Errorf("interval=%d should be disabled, got %v", iv, got)
-		}
-	}
-}
-
-// TestNextWakeTravelOnly 只开旅行巡检时按分钟粒度唤醒。
-func TestNextWakeTravelOnly(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}, TravelMinutes: 30})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 20, 30, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v", at, want)
-	}
-	if len(kinds) != 1 || kinds[0] != taskTravel {
-		t.Errorf("kinds=%v want [travel]", kinds)
-	}
-}
-
-// TestNextWakeSameInstantFiresAll 同一时刻既是签到整点又是旅行刻度时两类任务都要执行。
-func TestNextWakeSameInstantFiresAll(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}, TravelMinutes: 30})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 50, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v", at, want)
-	}
-	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskTravel) {
-		t.Errorf("kinds=%v want checkin+travel", kinds)
-	}
-}
-
-// TestNextWakeTravelDisabled 0 = 禁用：旅行不参与排程，唤醒退回整点表。
-func TestNextWakeTravelDisabled(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}, TravelMinutes: 0})
+// TestNextWakeKeepaliveOnly 签到已过点时按保活整点唤醒。
+func TestNextWakeKeepaliveOnly(t *testing.T) {
+	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
@@ -110,9 +54,30 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 	}
 }
 
-// TestNextWakeNothingScheduled 三类任务全空时返回零值，Run 只等退出信号。
+// TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
+func TestNextWakeSameInstantFiresAll(t *testing.T) {
+	s := New(Config{CheckinHours: []int{9, 22}, KeepaliveHours: []int{22}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v", at, want)
+	}
+	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskKeepalive) {
+		t.Errorf("kinds=%v want checkin+keepalive（同一时刻两任务）", kinds)
+	}
+
+	// 仅签到不重不漏：22 点过后下一次是次日 09:00，且只含签到。
+	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskCheckin {
+		t.Errorf("kinds=%v want [checkin]", kinds)
+	}
+}
+
+// TestNextWakeNothingScheduled 两类任务全空时返回零值，Run 只等退出信号。
 func TestNextWakeNothingScheduled(t *testing.T) {
-	s := &Scheduler{cfg: Config{TravelMinutes: 0}}
+	s := &Scheduler{cfg: Config{}}
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
 		t.Errorf("at=%v kinds=%v want zero/nil", at, kinds)

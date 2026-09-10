@@ -97,13 +97,8 @@ func main() {
 		Upstream:       up,
 		CheckinHours:   cfg.Schedule.CheckinHours,
 		KeepaliveHours: cfg.Schedule.KeepaliveHours,
-		TravelMinutes:  cfg.Schedule.TravelIntervalMinutes,
 	})
-	if cfg.Schedule.TravelIntervalMinutes > 0 {
-		log.Printf("猫猫旅行巡检已启用：每 %d 分钟", cfg.Schedule.TravelIntervalMinutes)
-	} else {
-		log.Printf("猫猫旅行巡检已禁用（travel_interval_minutes=0）")
-	}
+	log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励（%v 点）", cfg.Schedule.CheckinHours)
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,

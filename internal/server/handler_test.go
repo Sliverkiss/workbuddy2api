@@ -328,8 +328,9 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	if st.Until.Hour() != 4 {
 		t.Errorf("until hour=%d want 4 (next-day 04:00)", st.Until.Hour())
 	}
-	if d := time.Until(st.Until); d <= 0 || d > 24*time.Hour {
-		t.Errorf("until %v not within (0,24h]: %v", st.Until, d)
+	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时 now→次日 04:00 跨度 > 24h，属正常）。
+	if d := time.Until(st.Until); d <= 0 || d > 28*time.Hour {
+		t.Errorf("until %v not within (0,28h]: %v", st.Until, d)
 	}
 	// 立即换号成功：good 被选中。
 	stGood, _ := p.Status("good")

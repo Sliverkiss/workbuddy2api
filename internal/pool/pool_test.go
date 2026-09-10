@@ -631,8 +631,9 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if st.Until.Hour() != 4 {
 		t.Errorf("until hour=%d want 4", st.Until.Hour())
 	}
-	if d := st.Until.Sub(after); d > 24*time.Hour {
-		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
+	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时跨度 > 24h，属正常）。
+	if d := st.Until.Sub(after); d > 28*time.Hour {
+		t.Errorf("until %v is more than 28h out: %v", st.Until, d)
 	}
 	// 全冷却时余额耗尽（hard）号不参与兜底 → 返回 nil（等签到恢复）。
 	if got := p.Pick(); got != nil {

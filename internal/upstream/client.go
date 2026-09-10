@@ -68,9 +68,42 @@ var hardMarkers = []string{
 	"积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
 }
 
+// softRateMarkers 限流/节流关键词（小写比较 + 中文原文比较双通道）。
+// 上游在状态码非 429 时也会返回限流语义（如 200 + code 11140
+// "The model provider is rate-limiting requests."、400 + "rate limit"），
+// 此类响应若不识别，账号既不被冷却也不喂熔断，下次请求仍会被选中（issue #28）。
+//
+// 词表按子串匹配，宁缺毋滥：只收录明确指向「请求速率/模型用量被节流」的措辞。
+// 连字符形式（rate-limiting / rate-limited）需单列——Contains 不跨 '-'。
+// "too many" 会命中 "too many tokens" 这类客户端参数错误，代价是该号被软冷却
+// 一个 SoftCooldown（默认 60s）后自愈，远小于漏判限流导致反复选中同一号的代价。
+var softRateMarkers = []string{
+	"rate limit", // rate limit / rate limits / rate limiting
+	"rate-limiting",
+	"rate-limited",
+	"too many requests",
+	"too many",
+	"usage limit", // usage limit reached / model usage limit exceeded（用量节流，非计费余额）
+	"请求过于频繁", "限流",
+}
+
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
+//
+// 判定顺序自「严」到「宽」，每层的先后都有语义依据：
+//  1. 402 / hardMarkers —— 计费额度耗尽，最严、最不可自愈，必须最先判。
+//     "quota exceeded" 语义跨计费/限流两界，历史归 hard_credit，本次保持不变
+//     （issue #28 已记录该反向误判风险，待上游原始响应确认后再定）。
+//  2. sessionDeadMarkers —— 需要人工重登的终态。若 401 body 同时含 "12153" 与
+//     "rate limit"（如网关错误页混排），归 session_dead：短冷却救不活失效 session，
+//     误判为限流会让该死号留在池中反复被选中；且此层 marker 是精确词（12153 等），
+//     比限流层的大范围子串更具体，具体优先于宽泛。
+//  3. softRateMarkers —— 非 429 状态码携带限流文案（issue #28 修复点）。
+//     位于此处可覆盖 200/400/403/5xx 各状态码；429 且 body 含文案时在此短路，
+//     结果同为 soft_rate，与下一层一致。
+//  4. status==429 —— body 无文案时的兜底识别。
+//  5. 404 / 5xx / 其他 4xx —— 与限流无关的常规分类。
 func Classify(status int, body string) ErrKind {
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit
@@ -84,6 +117,11 @@ func Classify(status int, body string) ErrKind {
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
+		}
+	}
+	for _, m := range softRateMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
+			return ErrSoftRate
 		}
 	}
 	if status == http.StatusTooManyRequests {

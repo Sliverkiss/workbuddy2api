@@ -211,6 +211,81 @@ func TestUpstreamEnvOverride(t *testing.T) {
 	}
 }
 
+func TestTravelIntervalDefault(t *testing.T) {
+	// 默认 30 分钟；缺省与显式 0 语义不同，故 0 不走 fallback。
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 30 {
+		t.Errorf("travel_interval_minutes=%d want 30", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
+func TestTravelIntervalFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":15}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 15 {
+		t.Errorf("travel_interval_minutes=%d want 15", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
+func TestTravelIntervalZeroDisables(t *testing.T) {
+	// 0 = 禁用：normalize 不得把它回落成默认 30。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":0}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 0 {
+		t.Errorf("travel_interval_minutes=%d want 0 (禁用)", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
+func TestTravelIntervalNegativeTreatedAsDisabled(t *testing.T) {
+	// 负值同 0：禁用（避免负数 interval 造出奇怪的排程）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":-5}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 0 {
+		t.Errorf("travel_interval_minutes=%d want 0 (负值归一为禁用)", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
+func TestTravelIntervalEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_TRAVEL_INTERVAL_MINUTES", "60")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 60 {
+		t.Errorf("travel_interval_minutes=%d want env 60", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
+func TestTravelIntervalEnvZeroDisables(t *testing.T) {
+	// env 显式 0 也要能关掉（变量非空即生效）。
+	t.Setenv("WB2A_TRAVEL_INTERVAL_MINUTES", "0")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelIntervalMinutes != 0 {
+		t.Errorf("travel_interval_minutes=%d want env 0 (禁用)", c.Schedule.TravelIntervalMinutes)
+	}
+}
+
 func TestBadSessionTTL(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

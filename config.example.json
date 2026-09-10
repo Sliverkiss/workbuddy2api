@@ -8,7 +8,8 @@
   },
   "schedule": {
     "checkin_hours": [9, 21],
-    "keepalive_hours": [22]
+    "keepalive_hours": [22],
+    "travel_interval_minutes": 30
   },
   "upstream": {
     "timeout_seconds": 120,

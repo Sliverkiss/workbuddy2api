@@ -29,9 +29,15 @@ type Config struct {
 	StickyCount func() int
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
-	SoftCooldown time.Duration // 429 冷却，默认 60s
+	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 }
+
+// notFoundCooldown 上游 404 的固定短冷却时长。
+// 与 SoftCooldown 分流的原因：404 是上游**偶发**路径缺失，不是"本账号在限流"，
+// 若共用 soft_rate（600s 起 + 指数升级），一次偶发 404 会把好账号罚 10 分钟并逐次加倍。
+// 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
+const notFoundCooldown = 60 * time.Second
 
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
@@ -50,7 +56,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxRotate = 3
 	}
 	if cfg.SoftCooldown <= 0 {
-		cfg.SoftCooldown = 60 * time.Second
+		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
@@ -378,7 +384,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 //
 // 五条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
-//   - ErrSoftRate / ErrNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
+//   - ErrSoftRate → Cooldown(CoolSoft, soft_rate)：即时软冷却，连续触发指数退避（封顶 soft_rate_max）。
+//   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩，不随 soft_rate 退避。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
@@ -393,12 +400,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
+		// 软冷却基数来自 soft_rate（默认 600s）；同一账号连续触发时 pool 内部按
+		// softStreak 指数退避并封顶 soft_rate_max。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
 	case upstream.ErrNotFound:
-		// 404 短冷却（软冷却），防雪崩。
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
+		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
+		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

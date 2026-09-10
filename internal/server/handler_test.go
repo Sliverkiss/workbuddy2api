@@ -270,27 +270,40 @@ func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	}
 }
 
-// TestApplyErrorPolicyNotFoundFixedCooldown 404 分流：偶发上游 404 用固定 60s 短冷却，
-// 既不随 soft_rate 的 600s 基数，也不参与指数退避（否则一次偶发 404 就被罚 10 分钟并升级）。
-func TestApplyErrorPolicyNotFoundFixedCooldown(t *testing.T) {
+// TestApplyErrorPolicyNotFoundUsesFixedBase 404 分流：偶发上游 404 的冷却基数固定 60s
+// （notFoundCooldown），不取 soft_rate 的 600s 基数，也不受其配置值影响。
+//
+// 关于退避：404 仍走 Cooldown(CoolSoft)，因此与 429 共用同一 softStreak（本用例锚定这一
+// 现状）。这不构成"偶发 404 罚过重"的场景——streak 只在**连续**无成功时累积，
+// 中间任何一次成功（NoteSuccess）都会把它清零；故只有持续 404 的坏号才会退避升级。
+func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	h := NewHandler(Config{Pool: p, SoftCooldown: 20 * time.Minute}) // soft_rate 很大，验证 404 不受其影响
+	h := NewHandler(Config{Pool: p, SoftCooldown: 20 * time.Minute}) // soft_rate 配得很大，验证 404 不受其影响
 
 	notFoundSec := int64(notFoundCooldown / time.Second)
-	for i := 0; i < 3; i++ {
+	for i, want := range []int64{notFoundSec, 2 * notFoundSec, 4 * notFoundSec} {
 		h.applyErrorPolicy("u1", upstream.ErrNotFound)
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
 			t.Fatalf("call %d: 应为 soft 冷却: %+v", i+1, st)
 		}
-		if st.CoolRemaining <= 0 || st.CoolRemaining > notFoundSec {
-			t.Errorf("call %d: 404 cool_remaining_sec=%d want in (0,%d]（固定，不退避）",
-				i+1, st.CoolRemaining, notFoundSec)
+		if st.SoftStreak != i+1 {
+			t.Errorf("call %d: soft_streak=%d want %d", i+1, st.SoftStreak, i+1)
 		}
-		if st.SoftStreak != 0 {
-			t.Errorf("call %d: 404 不应推进 soft_streak, got %d", i+1, st.SoftStreak)
+		// 基数取自 notFoundCooldown（60s）而非注入的 soft_rate（20m）。
+		if st.CoolRemaining < want-3 || st.CoolRemaining > want {
+			t.Errorf("call %d: 404 cool_remaining_sec=%d want ~%d（固定基数 %ds，非 soft_rate）",
+				i+1, st.CoolRemaining, want, notFoundSec)
 		}
+	}
+
+	// 成功后 streak 归零 → 下次 404 回到 60s 基数。
+	// （签到解冻 ReenableIfCredits 不适用于本场景：它保留 streak，是冷却域的续期。）
+	p.NoteSuccess("u1")
+	h.applyErrorPolicy("u1", upstream.ErrNotFound)
+	if st, _ := p.Status("u1"); st.SoftStreak != 1 || st.CoolRemaining > notFoundSec {
+		t.Errorf("success should reset 404 backoff: %+v", st)
 	}
 }
 

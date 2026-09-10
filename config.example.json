@@ -4,7 +4,8 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "cooldown": {
-    "soft_rate": "60s"
+    "soft_rate": "600s",
+    "soft_rate_max": "2h"
   },
   "schedule": {
     "checkin_hours": [9, 21],

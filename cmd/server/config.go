@@ -21,7 +21,10 @@ type Config struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
 		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
-		SoftRate string `json:"soft_rate"` // "60s"
+		SoftRate string `json:"soft_rate"` // "600s"，软限流冷却基数
+		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
+		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
+		SoftRateMax string `json:"soft_rate_max"` // "2h"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -77,6 +80,7 @@ type Config struct {
 
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
+	SoftRateMaxDur      time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
@@ -91,7 +95,8 @@ func Default() *Config {
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 	}
-	c.Cooldown.SoftRate = "60s"
+	c.Cooldown.SoftRate = "600s"
+	c.Cooldown.SoftRateMax = "2h"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
 	// 开关「缺省 true」靠这两行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
@@ -150,6 +155,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
+	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
+		c.Cooldown.SoftRateMax = v
+	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -176,6 +184,13 @@ func (c *Config) normalize() error {
 	var err error
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
+	}
+	// 空值回落默认 2h（Default() 已置值；此兜底覆盖显式 "" 与 Default() 被绕过的场景）。
+	if c.Cooldown.SoftRateMax == "" {
+		c.Cooldown.SoftRateMax = "2h"
+	}
+	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
+		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

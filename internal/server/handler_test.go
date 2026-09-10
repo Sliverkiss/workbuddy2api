@@ -843,6 +843,60 @@ func TestHealthz200WithHealthy(t *testing.T) {
 	}
 }
 
+// TestHealthzServiceIdentity /healthz 无论 200 还是 503 都必须带网关身份标识
+// （响应体 service 字段 + X-Service 头）：宿主探测打到同端口的旧服务/其他服务时，
+// 对方即使返回 2xx 也不带本标识，宿主据此判"假成功"。
+func TestHealthzServiceIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(*pool.Pool)
+		wantCode int
+	}{
+		{"healthy", func(*pool.Pool) {}, http.StatusOK},
+		{"unhealthy", func(p *pool.Pool) { p.Disable("u1", "session dead") }, http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+			tc.setup(p)
+			h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code=%d want %d", rec.Code, tc.wantCode)
+			}
+			if got := rec.Header().Get("X-Service"); got != ServiceName {
+				t.Errorf("X-Service=%q want %q", got, ServiceName)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("healthz not json: %v body=%s", err, rec.Body)
+			}
+			if resp["service"] != ServiceName {
+				t.Errorf("service=%v want %q", resp["service"], ServiceName)
+			}
+		})
+	}
+}
+
+// TestHealthzServiceIdentityWithoutAuth /healthz 保持无鉴权（负载均衡友好）：
+// 配了 api_key 也不要求 Bearer，身份字段照常返回。
+func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+		Upstream: upstream.New(),
+		APIKey:   "secret",
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz must stay unauthenticated: code=%d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Service"); got != ServiceName {
+		t.Errorf("X-Service=%q want %q", got, ServiceName)
+	}
+}
+
 func TestStatusRequiresAuth(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New(), APIKey: "secret"})

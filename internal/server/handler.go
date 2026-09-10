@@ -33,6 +33,11 @@ type Config struct {
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 }
 
+// ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
+// 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
+// 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
+const ServiceName = "workbuddy2api"
+
 // Handler 主路由。
 type Handler struct {
 	cfg Config
@@ -83,7 +88,13 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 	if !h.cfg.Pool.ServableNow() {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"healthy": healthy, "total": total})
+	// 恒无鉴权（负载均衡/编排探活只需 2xx/503 语义），身份靠 service 字段 + X-Service 头双保险。
+	w.Header().Set("X-Service", ServiceName)
+	writeJSON(w, status, map[string]any{
+		"healthy": healthy,
+		"total":   total,
+		"service": ServiceName,
+	})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {

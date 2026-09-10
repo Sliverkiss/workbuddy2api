@@ -580,10 +580,14 @@ func TestNextDay4AMBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
 		now  string // RFC3339 (UTC 表示)
-		want string // 次日 04:00（同一时区，UTC 表示）
+		want string // 下一个 04:00（同一时区，UTC 表示）
 	}{
 		{"普通日", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
-		{"凌晨未到4点", "2026-08-28T03:59:59+08:00", "2026-08-29T04:00:00+08:00"},
+		// 凌晨 00:00~04:00 触发硬冷却：当天 04:00 尚未到，冷却应落在当天（而非次日），
+		// 否则多冷约一天（原 bug）。
+		{"凌晨02:30", "2026-08-28T02:30:00+08:00", "2026-08-28T04:00:00+08:00"},
+		{"凌晨00:00", "2026-08-28T00:00:00+08:00", "2026-08-28T04:00:00+08:00"},
+		{"凌晨03:59:59", "2026-08-28T03:59:59+08:00", "2026-08-28T04:00:00+08:00"},
 		{"正好4点", "2026-08-28T04:00:00+08:00", "2026-08-29T04:00:00+08:00"},
 		{"4点刚过", "2026-08-28T04:00:01+08:00", "2026-08-29T04:00:00+08:00"},
 		{"月末(31天月)", "2026-01-31T12:00:00+08:00", "2026-02-01T04:00:00+08:00"},
@@ -624,16 +628,16 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if st.Reason != "余额不足" {
 		t.Errorf("reason=%q", st.Reason)
 	}
-	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h。
+	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h
+	//（凌晨 00:00~04:00 触发时落在当天 04:00，其余时段落在次日 04:00，跨度恒 < 24h）。
 	if st.Until.Before(after) {
 		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
 	}
 	if st.Until.Hour() != 4 {
 		t.Errorf("until hour=%d want 4", st.Until.Hour())
 	}
-	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时跨度 > 24h，属正常）。
-	if d := st.Until.Sub(after); d > 28*time.Hour {
-		t.Errorf("until %v is more than 28h out: %v", st.Until, d)
+	if d := st.Until.Sub(after); d > 24*time.Hour {
+		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
 	}
 	// 全冷却时余额耗尽（hard）号不参与兜底 → 返回 nil（等签到恢复）。
 	if got := p.Pick(); got != nil {

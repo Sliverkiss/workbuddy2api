@@ -27,6 +27,7 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	}
 	obj["stream"] = true
 	normalizeToolChoice(obj)
+	normalizeRoles(obj)
 	normalizeReasoningEffort(obj, efforts)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
@@ -103,6 +104,38 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if lowest != "" {
 		obj[key] = lowest
 		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
+	}
+}
+
+// normalizeRoles 把 messages 里的 developer 角色归一为 system。
+//
+// 背景：上游对 messages 的 role 字段做白名单校验，developer 不在白名单内，
+// 命中即 HTTP 400 code=11128。developer 是 OpenAI 新规范里 system 的别名
+// （Codex / Cursor 等新客户端用它承载 system 级指令），改写为 system 不丢语义。
+//
+// 此归一化是「协议兼容」（补上游 role 白名单），不是「内容脱敏」，
+// 因此有意与 SanitizeFingerprints / sanitize 参数解耦：即使 sanitize=false 也照常归一。
+//
+// 只认 developer 这一个值：其余 role（system/user/assistant/tool/任意未知值）一律原样保留，
+// 不合并、不重排、不删除任何消息（上游对多 system 的行为尚未实测，合并会引入新变量）。
+func normalizeRoles(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	for i, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, ok := msg["role"].(string)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(role), "developer") {
+			msg["role"] = "system"
+			log.Printf("role normalized developer->system idx=%d", i)
+		}
 	}
 }
 

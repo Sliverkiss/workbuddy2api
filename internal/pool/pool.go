@@ -53,6 +53,7 @@ type Status struct {
 	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
 	Until           time.Time `json:"until,omitempty"`
 	Reason          string    `json:"reason,omitempty"`
+	SoftStreak      int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	Disabled        bool      `json:"disabled"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
@@ -84,6 +85,12 @@ type entry struct {
 	breakerUntil time.Time // 熔断截止（指数退避）
 	fails        int       // 连续失败计数（熔断用，唯一权威）
 	retryCount   int       // 已熔断次数（指数退避的指数）
+
+	// softStreak 连续软冷却次数（CoolSoft），独立于熔断器 fails 的**冷却域**计数器：
+	// fails 会被熔断触发清零、且被 hard 冷却与 NoteError 污染，无法表达"连续软限流"。
+	// 重置点只有两处（都是账号被证明恢复的时刻）：NoteSuccess、reviveCoolingLocked。
+	// 持久化（stateAccount.SoftStreak）：重启后软限流仍在退避，不因重启回到基数。
+	softStreak int
 
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
@@ -144,6 +151,9 @@ type stateAccount struct {
 	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
 	LastSuccess time.Time `json:"last_success,omitempty"`
 	LastErr     time.Time `json:"last_err,omitempty"`
+	// SoftStreak 连续软冷却次数（软退避指数）。旧 state.json 缺此字段 → 零值，
+	// 退避从基数重新开始（向后兼容）。
+	SoftStreak int `json:"soft_streak,omitempty"`
 }
 
 // stateFile 持久化格式。
@@ -181,6 +191,9 @@ type Pool struct {
 	breakerCooldown    time.Duration
 	breakerCooldownMax time.Duration
 
+	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
+	softRateMax time.Duration
+
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -203,6 +216,14 @@ const (
 	defaultBreakerCooldown    = 30 * time.Minute
 	defaultBreakerCooldownMax = 6 * time.Hour
 )
+
+// defaultSoftRateMax 软冷却指数退避的默认封顶：softRateMax 未注入（<=0）时按此值算，
+// 避免测试/裸用池时退避无上限。
+const defaultSoftRateMax = 2 * time.Hour
+
+// softStreakShiftMax 软冷却退避的最大左移位数（防 1<<streak 溢出成负数/零）。
+// 无论 streak 累积多少，封顶逻辑总会先生效，此值只是溢出兜底。
+const softStreakShiftMax = 16
 
 // StoreSnapshotter 池状态快照镜像的最小接口（redisstore.Store 满足；Noop 空实现安全）。
 // 与本地 state.json 并存，作启动恢复备份：快照比本地新才采用，否则本地优先。
@@ -247,6 +268,16 @@ func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 	if cooldownMax > 0 {
 		p.breakerCooldownMax = cooldownMax
+	}
+}
+
+// SetSoftRateMax 注入软冷却指数退避的封顶时长（main 从 config 解析后调用）。
+// 非正值保留原值（用默认 2h），风格同 SetBreaker。
+func (p *Pool) SetSoftRateMax(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 {
+		p.softRateMax = d
 	}
 }
 
@@ -666,16 +697,50 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
 // 冷却入口同时是熔断器的失败信号：喂入 fails，达到阈值按指数退避熔断（与 until 正交）。
+//
+// CoolSoft 额外做**连续软限流指数退避**：同一账号连续触发软冷却时，实际时长按
+// d << (softStreak-1) 逐次翻倍（封顶 softRateMax，见 softDurationLocked）。
+// 首 streak=1 → 实际时长 = d，单次调用语义与旧行为一致。
+// 这就是与熔断器并存的双重升级，且是**有意为之**：软退避管"近期被限流"，
+// 在 600s 起按分钟~小时级放大；熔断管"病态反复失败"，按 30m→1h→2h→6h 长期封禁。
+// 二者喂入路径共用本入口但计数器独立（softStreak vs fails），互不污染。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		if kind == CoolSoft {
+			e.softStreak++
+			d = p.softDurationLocked(d, e.softStreak)
+		}
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
 		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
 		p.dirty.Store(true)
 	}
+}
+
+// softDurationLocked 按连续软冷却次数把基数 d 指数放大：d << (streak-1)，封顶 softRateMax。
+// softRateMax 未注入（<=0）时按 defaultSoftRateMax 算。streak<=1 时原样返回 d。
+// 左移位数受 softStreakShiftMax 限制，避免 streak 极大时移位溢出。
+// 调用方必须已持有 p.mu。
+func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
+	if streak <= 1 {
+		return d
+	}
+	shift := streak - 1
+	if shift > softStreakShiftMax {
+		shift = softStreakShiftMax
+	}
+	d <<= shift
+	max := p.softRateMax
+	if max <= 0 {
+		max = defaultSoftRateMax
+	}
+	if d > max || d <= 0 { // d<=0：左移溢出成负数/零，同样按封顶兜底
+		d = max
+	}
+	return d
 }
 
 // recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
@@ -730,15 +795,18 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
-// reviveCoolingLocked 只清冷却（until/coolKind/reason）并更新 credits，不动熔断器
+// reviveCoolingLocked 只清冷却（until/coolKind/reason/softStreak）并更新 credits，不动熔断器
 // （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
 // billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
+// softStreak 属**冷却域**（与 until/coolKind 同域），故随冷却一并清零——与"解冻只清冷却
+// 不清熔断"的既有 C5 语义一致；硬冷却（CoolHard）本就不参与 streak，这里清的是历史软冷却累积。
 // 调用方必须已持有 p.mu。
 func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
+	e.softStreak = 0
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。
@@ -771,6 +839,7 @@ func (p *Pool) NoteError(uid string) {
 
 // NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并清空连续失败与熔断运行态。
 // 二进制模型：清 fails + retryCount + breakerUntil；不碰 until/coolKind（那些是即时冷却，各自到期）。
+// 额外清 softStreak：成功是账号已恢复的最强证据，连续软限流计数就此归零、退避回到基数。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -780,6 +849,7 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.fails = 0
 		e.retryCount = 0
 		e.breakerUntil = time.Time{}
+		e.softStreak = 0
 		p.dirty.Store(true)
 	}
 }
@@ -917,6 +987,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		LastSuccessTime: e.lastSuccess,
 		LastErrTime:     e.lastErr,
 		Until:           e.until,
+		SoftStreak:      e.softStreak,
 		InFlight:        int(e.inFlight.Load()),
 		BreakerFails:    e.fails,
 		BreakerUntil:    e.breakerUntil,
@@ -969,6 +1040,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			errTotal:     errTotal,
 			lastErr:      s.LastErr,
 			lastSuccess:  s.LastSuccess,
+			softStreak:   s.SoftStreak,
 		}
 	}
 }
@@ -1044,6 +1116,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			ErrTotal:     e.errTotal,
 			LastSuccess:  e.lastSuccess,
 			LastErr:      e.lastErr,
+			SoftStreak:   e.softStreak,
 		}
 	}
 	return sf

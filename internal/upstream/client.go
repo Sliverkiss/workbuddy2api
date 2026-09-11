@@ -1123,6 +1123,79 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain 
 	return remain, buckets, nil
 }
 
+// CreditBalance 账号积分余额（所有套餐聚合，负值钳 0）。
+// Size 为 0 表示上游未给出周期容量（此时 Remain 即绝对剩余，无法表达百分比）。
+type CreditBalance struct {
+	Remain int64 `json:"remain"`
+	Size   int64 `json:"size"`
+}
+
+// CreditBalance 账号积分余额，通过 /status 与 /v1/usage 对外透出。
+// 与 UserResource 的差异：本方法额外聚合 size（周期包容量），供百分比展示；
+// TotalDosage 是累计发放量、只增不减，不参与（拿它算百分比会偏差）。
+// realm 感知继承 billingMeterPaths（global 打 workbuddy.ai，CN 维持 /v2）。
+// 上游不可达/解析失败时返回错误且不改动池内余额（不把好数据覆盖成 0）。
+func (c *Client) CreditBalance(a *auth.Auth) (CreditBalance, error) {
+	now := time.Now()
+	body := map[string]any{
+		"PageNumber":               1,
+		"PageSize":                 100,
+		"ProductCode":              "p_tcaca",
+		"Status":                   []int{0, 3},
+		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
+		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
+	}
+	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+	if err != nil {
+		return CreditBalance{}, err
+	}
+	var resp struct {
+		Response struct {
+			Data struct {
+				Accounts []struct {
+					PackageName         string `json:"PackageName"`
+					CapacitySize        int64  `json:"CapacitySize"`
+					CapacityRemain      int64  `json:"CapacityRemain"`
+					CapacityUsed        int64  `json:"CapacityUsed"`
+					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
+					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
+				} `json:"Accounts"`
+			} `json:"Data"`
+		} `json:"Response"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return CreditBalance{}, fmt.Errorf("resource parse: %w", err)
+	}
+	var cr CreditBalance
+	var size int64
+	for _, acct := range resp.Response.Data.Accounts {
+		var r, s int64
+		switch {
+		case acct.CycleCapacitySize > 0:
+			r = acct.CycleCapacityRemain
+			s = acct.CycleCapacitySize
+		case acct.CycleCapacityRemain > 0 || acct.CycleCapacityUsed > 0:
+			r = acct.CycleCapacityRemain
+			s = acct.CycleCapacitySize
+		default:
+			r = acct.CapacityRemain
+			s = acct.CapacitySize
+		}
+		if r < 0 {
+			r = 0
+		}
+		cr.Remain += r
+		size += s
+	}
+	// 包容量尚未下发时 size 可能小于 remain，钳住避免百分比为负。
+	if size < cr.Remain {
+		size = cr.Remain
+	}
+	cr.Size = size
+	return cr, nil
+}
+
 // ResourceSummary 查询账号积分套餐的完整聚合口径（remain=剩余可花积分、used=已用、
 // size=总量、packs=套餐数），供运维工具（cmd/credit）按 realm 展示真实余额。
 // 与 UserResource 的差异：UserResource 只取 remain；本方法额外聚合 used/size/packs，

@@ -131,9 +131,9 @@ func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 // activityStreakStub 模拟 /v2/report（200 成功）+ /activity/growth/streak（days 可配）。
 type activityStreakStub struct {
 	reportCalls atomic.Int32
-	days        int    // streak 返回的连登天数
-	streakErr   bool   // 让 streak 返回 500
-	noUserId    bool   // 待测：上报不带 userId（服务端 200 但静默丢弃）
+	days        int  // streak 返回的连登天数
+	streakErr   bool // 让 streak 返回 500
+	noUserId    bool // 待测：上报不带 userId（服务端 200 但静默丢弃）
 	streakHits  atomic.Int32
 }
 

@@ -274,7 +274,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|---|
 | 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
 | 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时收窄**到上游重置墙钟并豁免切模型（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
-| Session 失效 | body 含 `Offline user session not found` / `12153` | **永久禁用** | 人工重新登录 |
+| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 会临时触发：网络抖动/上游闪断/refresh 竞态，P0-1 修复误判）；刷新成功 / 任意成功 / 手工复活清计数 | 人工重新登录（`login.sh`）或 `ReviveDisabled` 复活 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
 | 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
@@ -315,7 +315,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
 | 活跃上报 | `schedule.activity_enabled` 默认 `true` | `activity_hours` 默认 `[10]` 整点 | 对话活跃上报（`/v2/report`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
 | 猫猫旅行 | `schedule.travel_enabled` 默认 `true` | `travel_hours` 默认 `[9, 21]` 整点 | 独立排程：无猫领养 / idle 派出 / arrived 领奖；**已从签到剥离** |
-| 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
+| 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
 
 四类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
 
@@ -358,6 +358,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 每号每天 1 次即可（`activity_hours` 单时点）：日活跃奖励按天去重，重复上报无额外收益
 - `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
+- **streak 自检（P1）**：上报成功后回读 `GET /activity/growth/streak`（只读 oracle），
+  日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（
+  `report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败
+  记 warn 但不影响主流程（上报按天幂等，不重试，只观测）。
 - 关闭：`schedule.activity_enabled: false`
 - 手动诊断/补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
 
@@ -389,7 +393,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 `server.max_body_mb`（默认 8 MB） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性；disabled 账号透出 `disabled_reason`） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。

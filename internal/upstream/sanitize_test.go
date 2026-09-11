@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	ccIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
-	ccBranch   = "Main branch (you will usually use this for PRs)"
-	ccHeader   = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
+	ccIdentity    = "You are Claude Code, Anthropic's official CLI for Claude."
+	ccBranch      = "Main branch (you will usually use this for PRs)"
+	ccHeader      = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
+	codexIdentity = "You are a coding agent running in the Codex CLI. You are precise, safe, and helpful."
 )
 
 func TestIdentityRewritten(t *testing.T) {
@@ -34,6 +35,19 @@ func TestBranchRewritten(t *testing.T) {
 	}
 	if strings.Contains(out, "Main branch") {
 		t.Errorf("original branch still present: %q", out)
+	}
+}
+
+func TestCodexIdentityRewritten(t *testing.T) {
+	out := sanitizeText(codexIdentity)
+	if strings.Contains(out, "You are a coding agent running in the Codex CLI") {
+		t.Errorf("Codex identity still present: %q", out)
+	}
+	if !strings.Contains(out, "You are a coding agent running in the Workbuddy") {
+		t.Errorf("Codex identity rewrite missing: %q", out)
+	}
+	if !strings.Contains(out, "precise, safe, and helpful") {
+		t.Errorf("Codex behavioral guidance should be preserved: %q", out)
 	}
 }
 

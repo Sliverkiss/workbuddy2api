@@ -16,6 +16,7 @@ var sanitizeFeatures = []string{
 	"x-anthropic-billing-header", // header 键值段键名
 	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
+	"You are a coding agent running in the Codex CLI", // Codex CLI 身份句
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 }
 
@@ -34,6 +35,10 @@ var sanitizeRewrites = [][2]string{
 	{
 		"Main branch (you will usually use this for PRs)",
 		"Default branch (you will usually use this for PRs)",
+	},
+	{
+		"You are a coding agent running in the Codex CLI",
+		"You are a coding agent running in the Workbuddy",
 	},
 }
 

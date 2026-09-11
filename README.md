@@ -514,6 +514,24 @@ UTC+8 重置」），**不是账号整体被限流**。网关的处理：
 - **备份**：备份 `auths/`（凭证）与 `data/state.json`（池状态：积分/冷却/计数）；配置 Upstash 后状态另镜像至 Redis
 - **切勿提交 git**：`.gitignore` 已排除 `auths/`、`data/`、`backups/`、`config.json`、`*.key`、`*.pem`
 
+### 1.5 敏感文件清单与 .gitignore 纪律
+
+**永远不要提交到 git 的内容**（`.gitignore` 已覆盖，`git add` 前自查）：
+
+| 路径 | 内容 | 风险 |
+|---|---|---|
+| `config.json` | `api_key`、Upstash `token`/`url` | 网关鉴权凭据 + 第三方密钥 |
+| `auths/` | 各账号明文 `accessToken`/`refreshToken` | 账号直接被接管 |
+| `data/` | `state.json` 池状态（积分/冷却/计数） | 运营信息 |
+| `backups/` | 历史 auths/state 压缩包/快照 | 同 auths/ |
+| `docs/`、`TASK-*.md`、`ACCEPT-*.md`、`REPORT*` 等 | 本地工作文档（可能含内网拓扑/主机名/临时凭据） | 信息泄露 |
+| `*.key` / `*.pem` / `*.env` | 私钥、环境变量文件 | 凭据泄露 |
+
+**纪律**：
+- 新建敏感文件先确认落在 `.gitignore`（`git check-ignore <path>` 验证）。
+- 提交前 `git status` 全绿后，再跑一遍 `git diff --cached --stat` 确认没有凭据文件混入。
+- 仓库内只允许 `config.example.json` 形式的模板配置（占位符，零真值）。
+
 ### 2. 网络暴露与日志敏感度
 
 - 默认监听 `:7863`，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代/内网

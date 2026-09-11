@@ -22,7 +22,7 @@ type Config struct {
 	Pool           *pool.Pool
 	Upstream       *upstream.Client
 	CheckinHours   []int // 默认 [9, 21]
-	TravelHours    []int // 默认 [9]
+	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
 
@@ -53,7 +53,7 @@ func New(cfg Config) *Scheduler {
 		cfg.CheckinHours = []int{9, 21}
 	}
 	if len(cfg.TravelHours) == 0 {
-		cfg.TravelHours = []int{9}
+		cfg.TravelHours = []int{9, 21}
 	}
 	if len(cfg.ActivityHours) == 0 {
 		cfg.ActivityHours = []int{10}

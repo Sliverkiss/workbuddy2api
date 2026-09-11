@@ -178,7 +178,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `cooldown.soft_rate` | `600s` | 软限流（429/限流文案）冷却**基数**；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避的封顶时长 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。**空数组/`null` = 未配置回落默认**（不是禁用） |
-| `schedule.travel_hours` | `[9]` | 每日本地时区整点推进猫猫旅行状态机（领养/派出/领奖）。空数组/`null` 同上 |
+| `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养/派出/领奖）。空数组/`null` 同上 |
 | `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 first_buddy）。空数组/`null` 同上 |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活。空数组/`null` 同上 |
 | `schedule.checkin_enabled` | `true` | 签到**总开关**；`false` 真正关掉签到 |
@@ -277,7 +277,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|---|
 | 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
 | 活跃上报 | `schedule.activity_enabled` 默认 `true` | `activity_hours` 默认 `[10]` 整点 | 对话活跃上报（`/v2/report`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
-| 猫猫旅行 | `schedule.travel_enabled` 默认 `true` | `travel_hours` 默认 `[9]` 整点 | 独立排程：无猫领养 / idle 派出 / arrived 领奖；**已从签到剥离** |
+| 猫猫旅行 | `schedule.travel_enabled` 默认 `true` | `travel_hours` 默认 `[9, 21]` 整点 | 独立排程：无猫领养 / idle 派出 / arrived 领奖；**已从签到剥离** |
 | 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
 
 四类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
@@ -289,7 +289,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 ```json
 "schedule": {
   "checkin_hours": [9, 21],
-  "travel_hours": [9],
+  "travel_hours": [9, 21],
   "activity_hours": [10],
   "keepalive_hours": [22],
   "checkin_enabled": false,
@@ -326,8 +326,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 #### 猫猫旅行（独立排程）
 
-对池内每个可用账号在 `travel_hours`（默认 `[9]` 整点）单趟推进一次，
-每趟只做一个动作，不轮询不等待。每日 1 次 depart 足够；多时点 = 更及时的到站领奖，可自行加密。
+对池内每个可用账号在 `travel_hours`（默认 `[9, 21]` 整点）单趟推进一次，
+每趟只做一个动作，不轮询不等待。默认两趟闭环：9 点领昨日到站奖励并派出，
+21 点领当日到站奖励（`daily_limit_reached` 自动挡住二次派出）。
 
 | 探测结果 | 动作 |
 |---|---|

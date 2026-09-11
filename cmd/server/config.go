@@ -29,7 +29,7 @@ type Config struct {
 
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-		TravelHours    []int `json:"travel_hours"`    // [9]
+		TravelHours    []int `json:"travel_hours"`    // [9,21]
 		ActivityHours  []int `json:"activity_hours"`  // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
@@ -102,7 +102,7 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Schedule.CheckinHours = []int{9, 21}
-	c.Schedule.TravelHours = []int{9}
+	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
@@ -241,7 +241,7 @@ func (c *Config) normalize() error {
 		c.Schedule.CheckinHours = []int{9, 21}
 	}
 	if len(c.Schedule.TravelHours) == 0 {
-		c.Schedule.TravelHours = []int{9}
+		c.Schedule.TravelHours = []int{9, 21}
 	}
 	if len(c.Schedule.ActivityHours) == 0 {
 		c.Schedule.ActivityHours = []int{10}

@@ -45,7 +45,8 @@ func TestNextFireMergesSchedules(t *testing.T) {
 
 // TestNextWakeKeepaliveOnly 签到已过点时按保活整点唤醒。
 func TestNextWakeKeepaliveOnly(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}})
+	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22},
+		TravelDisabled: true, ActivityDisabled: true})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
@@ -94,7 +95,8 @@ func TestNextWakeNothingScheduled(t *testing.T) {
 
 // TestNextWakeCheckinDisabled 显式禁用签到后，排程里不再有签到时点（保活照常）。
 func TestNextWakeCheckinDisabled(t *testing.T) {
-	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}})
+	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
+		TravelDisabled: true, ActivityDisabled: true})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v（不应再有 21 点签到）", at, want)
@@ -106,7 +108,8 @@ func TestNextWakeCheckinDisabled(t *testing.T) {
 
 // TestNextWakeKeepaliveDisabled 显式禁用保活后，排程里不再有保活时点（签到照常）。
 func TestNextWakeKeepaliveDisabled(t *testing.T) {
-	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}})
+	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
+		TravelDisabled: true, ActivityDisabled: true})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v（不应再有 22 点保活）", at, want)

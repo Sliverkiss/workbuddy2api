@@ -404,8 +404,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	// 发现范围取所有 agents 引用模型的并集：比只读 cli 预设更全（能覆盖
 	// 其他 agent 引用的新模型，且上游调整 agent 名称时不会整体失败），又比
 	// 整份 models 目录更准——目录里混有上代退役模型和图像等非聊天模型
-	// （如 hunyuan-image-v3.0），不应暴露给聊天客户端。目录仅作为元数据
-	// 来源；agents 引用但目录尚无元数据的模型（如 lite）保留 ID 直接返回。
+	// （如 hunyuan-image-v3.0），不应暴露给聊天客户端。只有同时存在于
+	// models 目录且未禁用的模型才可用；agent 列表中的悬空 ID（如 lite）过滤。
 	out := make([]ModelInfo, 0, len(env.Data.Models))
 	seen := make(map[string]struct{}, len(env.Data.Models))
 	for _, ag := range env.Data.Agents {
@@ -417,7 +417,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 				continue
 			}
 			m, ok := dynMap[id]
-			if ok && m.Disabled {
+			if !ok || m.Disabled {
 				continue
 			}
 			out = append(out, ModelInfo{
@@ -430,9 +430,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			seen[id] = struct{}{}
 		}
 	}
-	// 兜底：agents 整体为空时退回目录中的启用模型，避免上游调整 agents
-	// 结构导致发现失败。
-	if len(out) == 0 {
+	// 兜底：agents 整体为空时退回目录中的启用模型，避免上游暂时不返回
+	// agents 导致发现失败。agents 有内容但没有可用模型时应返回错误，不能
+	// 把目录中的其他模型误报为可用。
+	if len(env.Data.Agents) == 0 {
 		for _, catalogModel := range env.Data.Models {
 			m := dynMap[catalogModel.ID]
 			if m.ID == "" || m.Disabled {

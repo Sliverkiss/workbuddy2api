@@ -230,19 +230,16 @@ func TestFetchModelsDiscoversAgentsUnion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch models: %v", err)
 	}
-	// 并集 = cli-model + agent-only + lite；catalog-only/image-model 未被任何
-	// agent 引用不暴露，disabled-model 已禁用被过滤。
-	if len(infos) != 3 {
-		t.Fatalf("want 3 agent-referenced models, got %d: %+v", len(infos), infos)
+	// 并集与目录交集 = cli-model + agent-only；catalog-only/image-model 未被
+	// agent 引用不暴露，disabled-model 与目录外的 lite 被过滤。
+	if len(infos) != 2 {
+		t.Fatalf("want 2 available agent-referenced models, got %d: %+v", len(infos), infos)
 	}
-	if infos[0].ID != "cli-model" || infos[1].ID != "agent-only" || infos[2].ID != "lite" {
+	if infos[0].ID != "cli-model" || infos[1].ID != "agent-only" {
 		t.Fatalf("unexpected discovery order/content: %+v", infos)
 	}
 	if infos[1].ContextWindow != 131072 || infos[1].MaxTokens != 8192 {
 		t.Errorf("catalog metadata lost: %+v", infos[1])
-	}
-	if infos[2].Name != "" || infos[2].ContextWindow != 0 {
-		t.Errorf("metadata-less agent model should keep zero metadata: %+v", infos[2])
 	}
 }
 
@@ -274,6 +271,18 @@ func TestFetchModelsWorksWithoutCLIAgent(t *testing.T) {
 	}
 	if len(infos) != 1 || infos[0].ID != "available-model" {
 		t.Fatalf("infos=%+v", infos)
+	}
+}
+
+func TestFetchModelsDoesNotFallbackWhenAgentsOnlyReferenceUnavailableModels(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[
+			{"id":"catalog-only","name":"Catalog only"}
+		],"agents":[{"name":"internal","models":["lite"]}]}}`), nil
+	})
+
+	if _, err := c.FetchModels(&auth.Auth{AccessToken: "at", UID: "u1"}); err == nil {
+		t.Fatal("want error when agents reference no available models")
 	}
 }
 

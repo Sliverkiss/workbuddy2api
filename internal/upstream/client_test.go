@@ -212,6 +212,71 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	}
 }
 
+func TestFetchModelsDiscoversAgentsUnion(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[
+			{"id":"cli-model","name":"CLI","maxInputTokens":65536},
+			{"id":"agent-only","name":"Internal","maxInputTokens":131072,"maxOutputTokens":8192},
+			{"id":"catalog-only","name":"Legacy catalog entry","maxInputTokens":32768},
+			{"id":"image-model","name":"Text to image","maxInputTokens":0},
+			{"id":"disabled-model","disabled":true}
+		],"agents":[
+			{"name":"cli","models":["cli-model","disabled-model"]},
+			{"name":"internal","models":["agent-only","lite"]}
+		]}}`), nil
+	})
+
+	infos, err := c.FetchModels(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	// 并集 = cli-model + agent-only + lite；catalog-only/image-model 未被任何
+	// agent 引用不暴露，disabled-model 已禁用被过滤。
+	if len(infos) != 3 {
+		t.Fatalf("want 3 agent-referenced models, got %d: %+v", len(infos), infos)
+	}
+	if infos[0].ID != "cli-model" || infos[1].ID != "agent-only" || infos[2].ID != "lite" {
+		t.Fatalf("unexpected discovery order/content: %+v", infos)
+	}
+	if infos[1].ContextWindow != 131072 || infos[1].MaxTokens != 8192 {
+		t.Errorf("catalog metadata lost: %+v", infos[1])
+	}
+	if infos[2].Name != "" || infos[2].ContextWindow != 0 {
+		t.Errorf("metadata-less agent model should keep zero metadata: %+v", infos[2])
+	}
+}
+
+func TestFetchModelsFallsBackToCatalogWithoutAgents(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[
+			{"id":"enabled-model","maxInputTokens":65536},
+			{"id":"disabled-model","disabled":true}
+		],"agents":[]}}`), nil
+	})
+
+	infos, err := c.FetchModels(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("fetch models without agents: %v", err)
+	}
+	if len(infos) != 1 || infos[0].ID != "enabled-model" || infos[0].ContextWindow != 65536 {
+		t.Fatalf("infos=%+v", infos)
+	}
+}
+
+func TestFetchModelsWorksWithoutCLIAgent(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[{"id":"available-model"}],"agents":[{"name":"codebuddy","models":["available-model"]}]}}`), nil
+	})
+
+	infos, err := c.FetchModels(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("fetch models without cli agent: %v", err)
+	}
+	if len(infos) != 1 || infos[0].ID != "available-model" {
+		t.Fatalf("infos=%+v", infos)
+	}
+}
+
 func TestChatStreamHardCreditError(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil

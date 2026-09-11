@@ -383,16 +383,6 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if env.Code != 0 {
 		return nil, fmt.Errorf("models api code=%d", env.Code)
 	}
-	var cliIDs []string
-	for _, ag := range env.Data.Agents {
-		if ag.Name == "cli" {
-			cliIDs = ag.Models
-			break
-		}
-	}
-	if len(cliIDs) == 0 {
-		return nil, fmt.Errorf("no cli agent models found")
-	}
 	dynMap := make(map[string]struct {
 		ID              string
 		Name            string
@@ -411,19 +401,51 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			Efforts         []string
 		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled, m.Reasoning.SupportedEfforts}
 	}
-	out := make([]ModelInfo, 0, len(cliIDs))
-	for _, id := range cliIDs {
-		m, ok := dynMap[id]
-		if !ok || m.Disabled {
-			continue
+	// 发现范围取所有 agents 引用模型的并集：比只读 cli 预设更全（能覆盖
+	// 其他 agent 引用的新模型，且上游调整 agent 名称时不会整体失败），又比
+	// 整份 models 目录更准——目录里混有上代退役模型和图像等非聊天模型
+	// （如 hunyuan-image-v3.0），不应暴露给聊天客户端。目录仅作为元数据
+	// 来源；agents 引用但目录尚无元数据的模型（如 lite）保留 ID 直接返回。
+	out := make([]ModelInfo, 0, len(env.Data.Models))
+	seen := make(map[string]struct{}, len(env.Data.Models))
+	for _, ag := range env.Data.Agents {
+		for _, id := range ag.Models {
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			m, ok := dynMap[id]
+			if ok && m.Disabled {
+				continue
+			}
+			out = append(out, ModelInfo{
+				ID:            id,
+				Name:          m.Name,
+				ContextWindow: m.MaxInputTokens,
+				MaxTokens:     m.MaxOutputTokens,
+				Efforts:       m.Efforts,
+			})
+			seen[id] = struct{}{}
 		}
-		out = append(out, ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			ContextWindow: m.MaxInputTokens,
-			MaxTokens:     m.MaxOutputTokens,
-			Efforts:       m.Efforts,
-		})
+	}
+	// 兜底：agents 整体为空时退回目录中的启用模型，避免上游调整 agents
+	// 结构导致发现失败。
+	if len(out) == 0 {
+		for _, catalogModel := range env.Data.Models {
+			m := dynMap[catalogModel.ID]
+			if m.ID == "" || m.Disabled {
+				continue
+			}
+			out = append(out, ModelInfo{
+				ID:            m.ID,
+				Name:          m.Name,
+				ContextWindow: m.MaxInputTokens,
+				MaxTokens:     m.MaxOutputTokens,
+				Efforts:       m.Efforts,
+			})
+		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")

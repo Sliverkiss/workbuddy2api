@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -94,6 +95,11 @@ func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 	fastActivity(t)
 	var okCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/report" {
+			// streak 自检等非 report 请求直接回 200（不带计数，只统计 /v2/report）。
+			w.Write([]byte(`{"code":0,"data":{}}`))
+			return
+		}
 		uid := r.Header.Get("X-User-Id")
 		if uid == "fail" {
 			w.WriteHeader(500)
@@ -115,6 +121,136 @@ func TestRunActivityNowErrorDoesNotAbort(t *testing.T) {
 
 	if n := okCalls.Load(); n != 1 {
 		t.Errorf("ok account report calls=%d want 1（失败账号不影响后续遍历）", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1：活跃上报后回读 streak 自检
+// ---------------------------------------------------------------------------
+
+// activityStreakStub 模拟 /v2/report（200 成功）+ /activity/growth/streak（days 可配）。
+type activityStreakStub struct {
+	reportCalls atomic.Int32
+	days        int    // streak 返回的连登天数
+	streakErr   bool   // 让 streak 返回 500
+	noUserId    bool   // 待测：上报不带 userId（服务端 200 但静默丢弃）
+	streakHits  atomic.Int32
+}
+
+func (s *activityStreakStub) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/report":
+			s.reportCalls.Add(1)
+			w.Write([]byte(`{"code":0,"msg":"OK"}`))
+		case "/activity/growth/streak":
+			s.streakHits.Add(1)
+			if s.streakErr {
+				w.WriteHeader(500)
+				w.Write([]byte(`boom`))
+				return
+			}
+			fmt.Fprintf(w, `{"code":0,"data":{"streak":{"days":%d}}}`, s.days)
+		default:
+			http.Error(w, "not found", 404)
+		}
+	})
+}
+
+// activityStreakScheduler 构造带 streak 自检 stub 的调度器。
+func activityStreakScheduler(t *testing.T, srv *httptest.Server) (*Scheduler, *pool.Pool) {
+	t.Helper()
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	return New(Config{Pool: p, Upstream: up}), p
+}
+
+// TestRunActivityNowSelfCheckDaysNormal 上报成功后回读 streak：days>=1 → 无告警。
+func TestRunActivityNowSelfCheckDaysNormal(t *testing.T) {
+	fastActivity(t)
+	stub := &activityStreakStub{days: 3}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunActivityNow()
+	if stub.reportCalls.Load() != 1 || stub.streakHits.Load() != 1 {
+		t.Errorf("report_calls=%d streak_hits=%d want 1/1", stub.reportCalls.Load(), stub.streakHits.Load())
+	}
+	// days>=1：checkActivityStreak 返回 false（无可疑）。
+	if s.checkActivityStreak(p.AuthByUID("u1")) {
+		t.Fatal("days>=1 不告警")
+	}
+}
+
+// TestRunActivityNowSelfCheckSilentDrop 上报 200 但 streak.days=0 → 告警（silent drop?）。
+func TestRunActivityNowSelfCheckSilentDrop(t *testing.T) {
+	fastActivity(t)
+	stub := &activityStreakStub{days: 0}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	if !s.checkActivityStreak(p.AuthByUID("u1")) {
+		t.Fatal("days=0 应告警（上报 200 但 silent drop?）")
+	}
+}
+
+// TestRunActivityNowSelfCheckGETFailure 回读 GET 失败 → 告警但不影响主流程（上报已成功）。
+func TestRunActivityNowSelfCheckGETFailure(t *testing.T) {
+	fastActivity(t)
+	stub := &activityStreakStub{days: 1, streakErr: true}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	// 直接断言 checkActivityStreak：GET 失败 → 告警。
+	if !s.checkActivityStreak(p.AuthByUID("u1")) {
+		t.Fatal("streak GET 失败应告警（reported but unverifiable）")
+	}
+	// 回读是只读 oracle：GET 失败不影响已发生的上报本轮走通（遍历继续）。
+	if stub.streakHits.Load() != 1 {
+		t.Errorf("streak_hits=%d want 1（GET 失败也打了 streak 请求）", stub.streakHits.Load())
+	}
+}
+
+// TestRunActivityNowSkipsSelfCheckOnReportFail 上报失败 → 不跑自检（SKIP，无意义回读）。
+func TestRunActivityNowSkipsSelfCheckOnReportFail(t *testing.T) {
+	fastActivity(t)
+	var streakHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/report":
+			w.WriteHeader(500)
+			w.Write([]byte(`boom`))
+		case "/activity/growth/streak":
+			streakHits.Add(1)
+			w.Write([]byte(`{"code":0,"data":{"streak":{"days":1}}}`))
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunActivityNow() // 不上报成功 → 无自检
+	if streakHits.Load() != 0 {
+		t.Errorf("streak hits=%d want 0（上报失败不跑自检）", streakHits.Load())
 	}
 }
 

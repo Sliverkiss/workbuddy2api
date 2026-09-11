@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -191,6 +192,8 @@ func (s *Scheduler) RunCheckinNow() {
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
 // 禁用账号跳过；无 AccessToken 的跳过；账号间限速 activityAccountDelay。
 // 一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务。
+// 上报成功后续跑 streak 自检（checkActivityStreak）：回读连登天数，发现
+// 「上报 200 但 streak 没涨」的静默丢弃（只读 oracle，不做重试）。
 func (s *Scheduler) RunActivityNow() {
 	first := true
 	for _, st := range s.cfg.Pool.List() {
@@ -208,8 +211,31 @@ func (s *Scheduler) RunActivityNow() {
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
 		if err := s.cfg.Upstream.ReportChatActivity(a, cid); err != nil {
 			log.Printf("activity %s: %v", a.UID, err)
+			continue
 		}
+		s.checkActivityStreak(a) // 上报成功 → 回读 streak 自检
 	}
+}
+
+// checkActivityStreak 上报成功后回读连登天数（只读 oracle，发现静默失败）。
+// 背景：REPORT-active-map.md §2 实测「上报 200 但静默丢弃」（缺 userId 时 progress 不动），
+// 上报 200 ≠ streak 计分——需要回读验证闭环。
+// 异常检测口径：days==0 → warn（report OK but streak.days=0 (silent drop?)）；
+// GET 失败 → warn 但不影响主流程（上报本身已成功，按天幂等，不做重试）。
+// 日志每号一行、一眼可 grep：`activity %s: streak days=%d`（成功也打，方便对账）。
+// 返回 true 表示「上报 OK 但 streak 可疑」（days==0 或回读失败），供测试断言。
+func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
+	days, err := s.cfg.Upstream.GrowthStreak(a)
+	if err != nil {
+		log.Printf("activity %s: streak check failed (report OK): %v", a.UID, err)
+		return true
+	}
+	if days == 0 {
+		log.Printf("activity %s: report OK but streak.days=0 (silent drop?)", a.UID)
+		return true
+	}
+	log.Printf("activity %s: streak days=%d", a.UID, days)
+	return false
 }
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。

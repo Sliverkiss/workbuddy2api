@@ -21,6 +21,7 @@ const (
 	buddyInfoPath      = "/activity/growth/buddy/info"
 	buddyFirstPath     = "/activity/growth/buddy/first"
 	buddyAgreementPath = "/activity/growth/buddy/agreement"
+	streakPath         = "/activity/growth/streak"
 )
 
 // buddyTaskIncompleteMarker 领养门槛未达标的业务错误关键词（HTTP 400 时出现）。
@@ -129,6 +130,26 @@ func (c *Client) BuddyFirst(a *auth.Auth) error {
 func (c *Client) BuddyAgreement(a *auth.Auth) error {
 	_, err := c.growthJSON(a, http.MethodPost, buddyAgreementPath, map[string]any{"agree": true})
 	return err
+}
+
+// GrowthStreak 查询连登天数（只读 oracle）。响应 `data.streak.days`（probe_active.py
+// 实测口径：`(s.get("data", {}).get("streak", {}) or {}).get("days")`）。
+// GET 失败（HTTP 非 2xx / 业务 code != 0）返回 *Error；缺 streak/days 字段返回 0
+// （days==0 即活跃自检的「上报 200 但静默丢弃」告警信号）。
+func (c *Client) GrowthStreak(a *auth.Auth) (int, error) {
+	data, err := c.growthJSON(a, http.MethodGet, streakPath, nil)
+	if err != nil {
+		return 0, err
+	}
+	var resp struct {
+		Streak struct {
+			Days int `json:"days"`
+		} `json:"streak"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Streak.Days, nil
 }
 
 // IsBuddyTaskIncomplete 判定「领养门槛未达标」：HTTP 400 + first_buddy 关键词。

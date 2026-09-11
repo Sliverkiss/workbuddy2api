@@ -213,6 +213,9 @@ func (s *Scheduler) RunActivityNow() {
 }
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
+// 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
+// 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
+// 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
 func (s *Scheduler) RunKeepaliveNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -226,10 +229,13 @@ func (s *Scheduler) RunKeepaliveNow() {
 			log.Printf("keepalive %s: %v", st.UID, err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-				s.cfg.Pool.Disable(st.UID, "12153 session dead")
+				if s.cfg.Pool.NoteSessionDead(st.UID) {
+					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", st.UID, pool.SessionDeadThreshold())
+				}
 			}
 			continue
 		}
+		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
 		if err := a.SaveAtomic(); err != nil {
 			log.Printf("keepalive %s save: %v", st.UID, err)
 		}

@@ -292,10 +292,65 @@ func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
 		BillingBaseCN: srv.URL,
 	}
 	s := New(Config{Pool: p, Upstream: up})
+	// P0-1：12153 连续 N 次才禁用。前 2 次刷新失败不应杀号（误判防护）。
+	s.RunKeepaliveNow()
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Fatalf("第 1 次 12153 不应禁用: %+v", st)
+	}
+	s.RunKeepaliveNow()
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Fatalf("第 2 次 12153 不应禁用: %+v", st)
+	}
+	// 第 3 次连续 12153 → 禁用。
 	s.RunKeepaliveNow()
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("should disable session-dead account: %+v", st)
+		t.Errorf("第 3 次连续 12153 应禁用: %+v", st)
+	}
+	if st.DisabledReason != "12153 session dead" {
+		t.Errorf("disabled_reason=%q want 12153 session dead", st.DisabledReason)
+	}
+}
+
+// TestRunKeepaliveSessionDeadResetBySuccess 两次 12153 后刷新成功 → 计数清零，
+// 再来的 12153 从第 1 次重新计（不会因历史失败被继续追杀）。
+func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
+	var fails atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fails.Add(1) == 3 { // 第 3 次（本次调度循环的第二轮）刷新成功
+			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+			return
+		}
+		w.WriteHeader(401)
+		w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt", ExpiresAt: 1}
+	p.Add(a)
+
+	up := &upstream.Client{
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	s.RunKeepaliveNow() // 12153 #1
+	s.RunKeepaliveNow() // 12153 #2
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Fatalf("precondition: 前 2 次不应禁用: %+v", st)
+	}
+	s.RunKeepaliveNow() // 刷新成功 → 清计数
+	// 接下来连续 2 次 12153：从新计数重新算，仍不应禁用（历史计数已清）。
+	s.RunKeepaliveNow() // 12153 #1（新计数）
+	s.RunKeepaliveNow() // 12153 #2（新计数）
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Fatalf("刷新成功清计数后连续 2 次 12153 不应禁用: %+v", st)
+	}
+	s.RunKeepaliveNow() // 12153 #3（新计数）→ 禁用
+	if st, _ := p.Status("u1"); !st.Disabled {
+		t.Fatalf("新计数第 3 次 12153 应禁用: %+v", st)
 	}
 }
 

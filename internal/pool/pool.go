@@ -55,6 +55,7 @@ type Status struct {
 	Reason          string    `json:"reason,omitempty"`
 	SoftStreak      int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	Disabled        bool      `json:"disabled"`
+	DisabledReason  string    `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -96,6 +97,12 @@ type entry struct {
 	// 仅当冷却由「带解析时间的 6004」触发时记录；空 = 普通软冷却（不豁免）。
 	// 运行态语义（不持久化）：重启清零，退化为现状。
 	softRateModel string
+
+	// sessionDeadFails 连续 12153（ErrSessionDead）计数。12153 在真实环境会被临时性触发
+	// （网络抖动/上游闪断/refresh 竞态），一次失败就永久禁用太粗暴——连续达到阈值才判死。
+	// 运行态语义（不持久化，与 inFlight 同语义）：重启清零可接受——重启后首个 keepalive
+	// 成功即清计数，误判号不会因重启前的历史累积被继续追杀。
+	sessionDeadFails int
 
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
@@ -238,6 +245,18 @@ const (
 // defaultSoftRateMax 软冷却指数退避的默认封顶：softRateMax 未注入（<=0）时按此值算，
 // 避免测试/裸用池时退避无上限。
 const defaultSoftRateMax = 2 * time.Hour
+
+// sessionDeadThreshold 连续 ErrSessionDead（12153）达到该次数才永久禁用。
+// 12153 会被临时性触发（网络抖动/上游闪断/refresh 竞态），一次失败即禁用的旧行为
+// 会误杀健康账号（P0-1：13 个 disabled 号全是误判）。3 次连续才判死：容忍偶发抖动，
+// 又不会让真正的死 session 留在池里反复被选中。
+const sessionDeadThreshold = 3
+
+// sessionDeadReason 12153 判定为 session 死亡时的持久化 reason。
+const sessionDeadReason = "12153 session dead"
+
+// SessionDeadThreshold 暴露连续 12153 的禁用阈值（供 scheduler 日志/运维文档引用）。
+func SessionDeadThreshold() int { return sessionDeadThreshold }
 
 // softStreakShiftMax 软冷却退避的最大左移位数（防 1<<streak 溢出成负数/零）。
 // 无论 streak 累积多少，封顶逻辑总会先生效，此值只是溢出兜底。
@@ -888,6 +907,58 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
+// NoteSessionDead 记录一次 ErrSessionDead（12153）——**不立即禁用**。
+// 旧行为一次 12153 即 Disable，但 12153 会被临时性触发（网络抖动/上游闪断/refresh
+// 竞态），一次失败就永久杀号会误杀健康账号（P0-1 侦察：13 个 disabled 号全部 refresh
+// 成功，是历史误判的受害者）。改为连续 sessionDeadThreshold 次才禁用：
+// 计数 +1，达到阈值 → Disable（reason=12153 session dead）并清计数；
+// refresh 成功 / 任意成功 / 手工复活 → ClearSessionDead 清计数。
+// 返回 true 表示本次已达阈值并完成禁用。
+// 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
+// disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
+func (p *Pool) NoteSessionDead(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.sessionDeadFails++
+	if e.sessionDeadFails < sessionDeadThreshold {
+		return false
+	}
+	e.disabled = true
+	e.reason = sessionDeadReason
+	e.sessionDeadFails = 0
+	p.dirty.Store(true)
+	return true
+}
+
+// ClearSessionDead 清连续 12153 计数——账号被证明未死的任何时刻调用：
+// refresh 成功（RunKeepaliveNow）、chat 成功（NoteSuccess）、手工复活（ReviveDisabled）。
+func (p *Pool) ClearSessionDead(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.sessionDeadFails = 0
+	}
+}
+
+// ReviveDisabled 人工/端点复活入口：清除 disabled + reason + 连续 12153 计数，
+// 账号回到池子（若无其他冷却/熔断则立即可选，健康检查自然接管）。
+// **不改** Disabled 在选号/状态端点的既有语义：disabled 号依然不参与选号，
+// 直到被本方法复活。不存在的 uid 为空操作。
+func (p *Pool) ReviveDisabled(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && e.disabled {
+		e.disabled = false
+		e.reason = ""
+		e.sessionDeadFails = 0
+		p.dirty.Store(true)
+	}
+}
+
 // reviveCoolingLocked 只清冷却（until/coolKind/reason/softStreak）并更新 credits，不动熔断器
 // （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
 // billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
@@ -934,6 +1005,7 @@ func (p *Pool) NoteError(uid string) {
 // NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并清空连续失败与熔断运行态。
 // 二进制模型：清 fails + retryCount + breakerUntil；不碰 until/coolKind（那些是即时冷却，各自到期）。
 // 额外清 softStreak：成功是账号已恢复的最强证据，连续软限流计数就此归零、退避回到基数。
+// 同样清 sessionDeadFails：成功证明 session 未死（与 ClearSessionDead 语义一致）。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -944,6 +1016,7 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.retryCount = 0
 		e.breakerUntil = time.Time{}
 		e.softStreak = 0
+		e.sessionDeadFails = 0
 		p.dirty.Store(true)
 	}
 }
@@ -1085,6 +1158,10 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:        int(e.inFlight.Load()),
 		BreakerFails:    e.fails,
 		BreakerUntil:    e.breakerUntil,
+	}
+	if st.Disabled {
+		// 禁用账号透出禁用原因（运维看不到为什么死）。
+		st.DisabledReason = e.reason
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。

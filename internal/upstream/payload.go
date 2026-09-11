@@ -29,6 +29,9 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
 	normalizeReasoningEffort(obj, efforts)
+	// DeepSeek 思维链开关（见 thinking.go）：reasoning_effort 降级之后注入，
+	// 保证走降级链路的请求同样带上 thinking.type=enabled，思维链不丢。
+	injectThinking(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)

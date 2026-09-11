@@ -291,12 +291,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			heldUID = ""
 		}
 	}
+	// unbindSticky 解绑当前会话粘性号（stickyUID 非空时）。供「粘性号不可用/被抢」与 fail 共用。
+	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
+	unbindSticky := func() {
+		if stickyUID != "" {
+			h.cfg.Session.Unbind(sessKey)
+			stickyUID = ""
+		}
+	}
 	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
 	fail := func(uid string) {
 		releaseHeld()
 		if stickyUID != "" && uid == stickyUID {
-			h.cfg.Session.Unbind(sessKey)
-			stickyUID = ""
+			unbindSticky()
 		}
 	}
 
@@ -319,8 +326,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickByUID(stickyUID)
 			if acct == nil {
 				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
-				h.cfg.Session.Unbind(sessKey)
-				stickyUID = ""
+				unbindSticky()
 			}
 		}
 		if acct == nil {
@@ -340,8 +346,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
 			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
-				h.cfg.Session.Unbind(sessKey)
-				stickyUID = ""
+				unbindSticky()
 			}
 			continue // 最后一个名额被并发抢走 → 换号
 		}

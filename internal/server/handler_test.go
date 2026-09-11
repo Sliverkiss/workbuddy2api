@@ -1185,3 +1185,90 @@ func TestContentBlockedDoesNotPenalizeAccount(t *testing.T) {
 		t.Fatalf("ErrContentBlocked should not penalize account: %+v", st)
 	}
 }
+
+// TestCustomModeFingerprintSanitizePreserved custom 端到端：user 消息含 Claude Code
+// 指纹句（PR39 fixture 串）→ Rewrite 注入自有 system → 经 sanitize → 出站 body 中
+// 该指纹被改写、system 为自有提示词。证明两层（提示词替换 + 清洗）叠加工作。
+//
+// 两层各自职责（互不替代）：
+//   - prompt.Rewrite 替换 system/developer 消息（消灭 system 来源指纹）；
+//   - sanitizeMessages 改写 user/assistant 消息中残留的指纹串（兜底用户上下文）。
+func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
+	// 捕获出站 body（prepareBody 已强制 stream + 归一 + 清洗后）。
+	var sentBody []byte
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			sentBody = raw
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:           "https://fake.example",
+		SanitizeFingerprints: true, // 开启清洗层（与生产一致）
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	const customSys = "我是网关自有提示词"
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})
+
+	// user 消息含 Claude Code 指纹句（PR39 的 fixture 串，逐字精确指纹）。
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"glm-5.2",
+		"stream":true,
+		"messages":[
+			{"role":"system","content":"You are Claude Code, Anthropic's official CLI for Claude."},
+			{"role":"user","content":"You are Claude Code, Anthropic's official CLI for Claude. Main branch (you will usually use this for PRs)"}
+		]
+	}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	out := string(sentBody)
+	// 1) system 为自有提示词，旧 system 内容零残留。
+	if !strings.Contains(out, customSys) {
+		t.Errorf("out body should contain custom system prompt: %s", out)
+	}
+	if strings.Contains(out, "official CLI for Claude.") && strings.Contains(out, "You are Claude Code, Anthropic's") {
+		// 旧 system 原文（含句点）不应以 system 角色出现；但 sanitize 把它改写为
+		// "...official CLI tool for Claude."，所以原文 fingerprint 串应消失。
+	}
+	// 原始指纹串（逐字精确匹配）在出站 body 中应被改写：
+	// "official CLI for Claude." → "official CLI tool for Claude."
+	// "Main branch (" → "Default branch ("
+	if strings.Contains(out, "official CLI for Claude.") {
+		t.Errorf("identity fingerprint not rewritten by sanitize in user msg: %s", out)
+	}
+	if strings.Contains(out, "Main branch (you will usually use this for PRs)") {
+		t.Errorf("branch fingerprint not rewritten by sanitize in user msg: %s", out)
+	}
+	// 改写后的痕迹应在（证明 sanitize 层生效，不是"全删了"）。
+	if !strings.Contains(out, "official CLI tool for Claude.") {
+		t.Errorf("sanitized identity rewrite missing: %s", out)
+	}
+	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
+		t.Errorf("sanitized branch rewrite missing: %s", out)
+	}
+	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。
+	var obj map[string]any
+	if err := json.Unmarshal(sentBody, &obj); err != nil {
+		t.Fatalf("out body not json: %v %s", err, out)
+	}
+	msgs := obj["messages"].([]any)
+	var systemCount int
+	for _, m := range msgs {
+		mm := m.(map[string]any)
+		if mm["role"] == "system" {
+			systemCount++
+			if mm["content"] != customSys {
+				t.Errorf("system content=%v want %q", mm["content"], customSys)
+			}
+		}
+	}
+	if systemCount != 1 {
+		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+	}
+}

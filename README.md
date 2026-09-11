@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
-  OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到保活 · 流式/非流式
+  OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到/活跃/旅行/保活 · 流式/非流式
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🔄 **多账号池** | 三因子加权随机选号（积分比例 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
 | 🛡️ **熔断与冷却** | 429/限流文案软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑 |
-| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活 |
+| ⏰ **定时任务** | 签到（09/21 点）+ 活跃上报（10 点，点亮连登/解锁领养）+ 猫猫旅行（9 点，独立排程）+ token 保活（22 点），四类各自独立开关 |
 | ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
@@ -54,7 +54,7 @@ flowchart LR
         H --> S
         P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 保活 22 · 旅行 30m"] --> P
+        T["定时调度\n签到 09/21 · 旅行 09 · 活跃 10 · 保活 22"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
     end
 
@@ -177,9 +177,13 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `cooldown.soft_rate` | `600s` | 软限流（429/限流文案）冷却**基数**；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避的封顶时长 |
-| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询；收尾顺带跑一趟猫猫旅行。**空数组/`null` = 未配置回落默认**（不是禁用） |
+| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。**空数组/`null` = 未配置回落默认**（不是禁用） |
+| `schedule.travel_hours` | `[9]` | 每日本地时区整点推进猫猫旅行状态机（领养/派出/领奖）。空数组/`null` 同上 |
+| `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 first_buddy）。空数组/`null` 同上 |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活。空数组/`null` 同上 |
-| `schedule.checkin_enabled` | `true` | 签到**总开关**；`false` 真正关掉签到（**猫猫旅行随之停摆**，见下） |
+| `schedule.checkin_enabled` | `true` | 签到**总开关**；`false` 真正关掉签到 |
+| `schedule.travel_enabled` | `true` | 猫猫旅行**总开关**；`false` 完全停旅行（独立于签到） |
+| `schedule.activity_enabled` | `true` | 活跃上报**总开关**；`false` 停活跃上报 |
 | `schedule.keepalive_enabled` | `true` | token 保活总开关；`false` 关掉保活 |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
@@ -271,35 +275,41 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 任务 | 开关 | 时刻（本地时区） | 行为 |
 |---|---|---|---|
-| 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号；**收尾顺带跑一趟猫猫旅行** |
+| 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
+| 活跃上报 | `schedule.activity_enabled` 默认 `true` | `activity_hours` 默认 `[10]` 整点 | 对话活跃上报（`/v2/report`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
+| 猫猫旅行 | `schedule.travel_enabled` 默认 `true` | `travel_hours` 默认 `[9]` 整点 | 独立排程：无猫领养 / idle 派出 / arrived 领奖；**已从签到剥离** |
 | 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
 
-容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+四类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
 
 #### 关闭定时任务
 
-用 `schedule.checkin_enabled` / `schedule.keepalive_enabled` 显式关闭，两者互相独立：
+用 `schedule.*_enabled` 显式关闭，四者互相独立：
 
 ```json
 "schedule": {
   "checkin_hours": [9, 21],
+  "travel_hours": [9],
+  "activity_hours": [10],
   "keepalive_hours": [22],
   "checkin_enabled": false,
+  "travel_enabled": true,
+  "activity_enabled": true,
   "keepalive_enabled": true
 }
 ```
 
-上例：**只关签到，保活照常 22:00 跑**。两个都设 `false` 则调度器无任何时点可等，
+上例：**只关签到，旅行/活跃/保活照常跑**。四个都设 `false` 则调度器无任何时点可等，
 `Run` 不空转、直接阻塞等待退出信号（不会忙等空烧 CPU）。
 
 几条必须知道的语义：
 
 - **为什么用独立开关，而不是把小时数组留空**：空数组与 `null` 在本项目里一贯表示
-  **「未配置 → 回落默认」**（`[9, 21]` / `[22]`），不是「禁用」。沿用该语义可保证
+  **「未配置 → 回落默认」**（`[9, 21]` / `[9]` / `[10]` / `[22]`），不是「禁用」。沿用该语义可保证
   老 config 行为逐字不变；真正关闭请用 `*_enabled: false`。
-- **关签到 = 猫猫旅行也停**：旅行没有独立开关，它搭签到时点便车执行（见下节）。
-  想让旅行继续跑就不能关签到——如需保留旅行请把 `checkin_hours` 调成你想要的时点。
-- **禁用不会擦除小时配置**：`checkin_hours` 原样保留，改回 `true` 即恢复原时点，无需补配。
+- **旅行已从签到剥离**：旅行现在是独立排程（`travel_hours`），不再搭签到便车。
+  **`checkin_enabled: false` 只关签到，旅行照跑**（想让旅行也停请设 `travel_enabled: false`）。
+- **禁用不会擦除小时配置**：`*_hours` 原样保留，改回 `true` 即恢复原时点，无需补配。
 - **小时值必须是 0-23**：写了 `-1`、`25` 之类的非法值会在启动时**直接报错**并提示改用
   开关（不做静默兜底，避免你以为关掉了、实际却在别的整点照常执行）。
 - 开关只影响**本进程的定时排程**，不改变池内冷却/熔断/禁用等既有状态机行为；
@@ -307,15 +317,27 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **关签到的连带影响**：签到的余额查询会「余额恢复即解冻」被硬冷却的账号（402 余额不足），
   关掉后这类账号只能等硬冷却**次日 04:00 自然到期**才回到池中——当日余额回补不再提前解冻。
 
-#### 猫猫旅行（随签到时点合并执行）
+#### 活跃上报（独立排程）
 
-对池内每个可用账号在**签到时点（`checkin_hours`，默认 9/21 点）单趟推进一次**，
+对池内每个可用账号在**`activity_hours`（默认 `[10]` 整点）发送一条对话活跃上报**
+（`POST /v2/report`，事件 `chat_request_send`，body 为数组，事件必须含 `userId`）：
+
+- **一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务**（领养前置，详见
+  [REPORT-active-map.md](REPORT-active-map.md)）。
+- **风控口径**：每号每天 1 次即可（`activity_hours` 单时点）。**不要**做成多时点高频上报——
+  日活跃奖励按天去重，重复上报无额外收益，只增加上游请求。
+- 服务端不校验 body 与真实会话一致性：`conversationId` 由调用方生成
+  （`wb2api-<ms>`），无需真实会话。
+- **限速**：账号间间隔 800ms（与旅行同口径），避免触发上游风控。
+- **关闭**：`schedule.activity_enabled: false`。
+
+#### 猫猫旅行（独立排程）
+
+对池内每个可用账号在**`travel_hours`（默认 `[9]` 整点）单趟推进一次**，
 每趟只做一个动作，不轮询不等待：
 
-**为什么不再单独排程**：每日上限按「派出」计 1 次/天，奖励在派出时即锁定、晚领不丢分；
-旅行周期以小时计，30 分钟粒度的额外巡检不会多派一次，只是白白增加上游请求。
-合并到签到时点后每账号每天 2 趟，签到 → 派猫 → 领奖一次跑完。
-（签到排在旅行之前：先签到解冻冷却账号，本轮旅行才能覆盖到它们。）
+**`travel_hours` 默认 `[9]` 而非 `[9,21]`**：每日 1 次 depart 足够，09 点一趟即可；
+多时点 = 多次巡检状态机，claim 到站奖励更及时（可自行加密）。
 
 | 探测结果 | 动作 |
 |---|---|
@@ -326,14 +348,12 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - **领养门槛**：conversation 门槛未达标时上游返回 HTTP 400 `first_buddy task not completed yet`，
   属预期行为——**每账号每自然日只尝试一次**，失败后当日静默跳过，跨日（00:00 CST）自动重试；
-  记录仅存内存，进程重启后清零。
+  记录仅存内存，进程重启后清零。门槛可用活跃上报（`activity_enabled`）解除。
 - **限速**：账号间间隔 800ms（46 个账号约 40s），避免触发上游风控。
 - **每自然日 1 次派出**：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关。
 - **失败隔离**：单个账号查询/动作失败只跳过该账号本轮，不中断其他账号；401 不做强刷
   （token 刷新交 22:00 保活），失败信息按 `travel <uid>: <动作>: <错误>` 落日志。
-- **关闭**：旅行无独立开关——它随签到一起跑，不再单独排程。
-  因此 **`schedule.checkin_enabled: false` 关掉签到的同时，旅行也一并停摆**；
-  只想调整时点（而非关闭）请改 `checkin_hours`。
+- **关闭**：`schedule.travel_enabled: false`。旅行已从签到剥离，关签到不再影响旅行。
 
 签到与保活配到同一小时（如都含 22 点）时，两类任务都会执行。
 
@@ -452,11 +472,12 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 | `/v2/plugin/auth/token/refresh` | POST | 同上 | token 刷新 |
 | `/v2/billing/meter/daily-checkin` | POST | `www.codebuddy.cn` | 每日签到 |
 | `/v2/billing/meter/get-user-resource` | POST | 同上 | 余额查询 |
+| `/v2/report` | POST | 同上 | 对话活跃上报（`chat_request_send` 事件数组，必须含 `userId`；点亮连登/解锁领养） |
 | `/v2/plugin/auth/state?platform=CLI` | POST | `copilot.tencent.com` | OAuth 取授权 URL |
 | `/v2/plugin/auth/token?state=` | GET | 同上 | OAuth 轮询取 token |
 | `/v2/plugin/login/account?state=` | GET | 同上 | OAuth 取账号信息 |
 | `/activity/growth/buddy/agreement` `first` `info` | POST/GET | 同上 | 猫猫旅行：同意协议 / 首次领养 / 查询 |
-| `/activity/growth/buddy/travel/status` `depart` `claim` | GET/POST | 同上 | 猫猫旅行：状态 / 派出 / 领奖（随签到时点执行） |
+| `/activity/growth/buddy/travel/status` `depart` `claim` | GET/POST | 同上 | 猫猫旅行：状态 / 派出 / 领奖（独立排程 travel_hours） |
 
 > 上述 `/v2/*` 端点是 CodeBuddy 官方 CLI/插件使用的接口，**未见公开 API 文档，属非公开/逆向接口**；本项目不主张任何上游接口的官方授权或稳定性承诺。出站统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**。
 

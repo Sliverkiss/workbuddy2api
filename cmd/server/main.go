@@ -97,20 +97,36 @@ func main() {
 		Pool:              p,
 		Upstream:          up,
 		CheckinHours:      cfg.Schedule.CheckinHours,
+		TravelHours:       cfg.Schedule.TravelHours,
+		ActivityHours:     cfg.Schedule.ActivityHours,
 		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
 		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
+		TravelDisabled:    !cfg.Schedule.TravelEnabled,
+		ActivityDisabled:  !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
-		log.Printf("签到已禁用（schedule.checkin_enabled=false）：猫猫旅行同时停摆（搭签到便车）")
-	case len(cfg.Schedule.CheckinHours) == 0:
-		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励")
+		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
 	default:
-		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励（%v 点）", cfg.Schedule.CheckinHours)
+		log.Printf("签到已启用：%v 点（签到 + 余额查询解冻）", cfg.Schedule.CheckinHours)
+	}
+	switch {
+	case !cfg.Schedule.TravelEnabled:
+		log.Printf("猫猫旅行已禁用（schedule.travel_enabled=false）")
+	default:
+		log.Printf("猫猫旅行已启用：%v 点（独立排程：领养 / 派出 / 领奖）", cfg.Schedule.TravelHours)
+	}
+	switch {
+	case !cfg.Schedule.ActivityEnabled:
+		log.Printf("活跃上报已禁用（schedule.activity_enabled=false）")
+	default:
+		log.Printf("活跃上报已启用：%v 点（每日 1 次，点亮连登 + 解锁 first_buddy）", cfg.Schedule.ActivityHours)
 	}
 	if !cfg.Schedule.KeepaliveEnabled {
 		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
+	} else {
+		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
 	}
 
 	h := server.NewHandler(server.Config{

@@ -267,7 +267,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 同一会话尽量复用同一账号，多轮对话不跳号：
 
-- 会话键提取顺序：`metadata.conversation_id` → `metadata.user_id` → 顶层 `conversation_id`
+- 会话键提取顺序：`metadata.conversation_id` → `metadata.conversationId` → `metadata.user_id` → 顶层 `conversation_id` → 顶层 `conversationId`（snake_case 优先于 camelCase）
 - TTL 滚动续期（默认 30m），GC 周期 5m；绑定可镜像到 Redis（7 天）防重启丢失
 - 请求失败自动解绑；成功后绑定跟随最终成功账号
 
@@ -300,44 +300,34 @@ curl -s http://localhost:7863/v1/chat/completions \
 ```
 
 上例：**只关签到，旅行/活跃/保活照常跑**。四个都设 `false` 则调度器无任何时点可等，
-`Run` 不空转、直接阻塞等待退出信号（不会忙等空烧 CPU）。
+`Run` 不空转、直接阻塞等待退出信号。
 
 几条必须知道的语义：
 
-- **为什么用独立开关，而不是把小时数组留空**：空数组与 `null` 在本项目里一贯表示
-  **「未配置 → 回落默认」**（`[9, 21]` / `[9]` / `[10]` / `[22]`），不是「禁用」。沿用该语义可保证
-  老 config 行为逐字不变；真正关闭请用 `*_enabled: false`。
-- **旅行已从签到剥离**：旅行现在是独立排程（`travel_hours`），不再搭签到便车。
-  **`checkin_enabled: false` 只关签到，旅行照跑**（想让旅行也停请设 `travel_enabled: false`）。
-- **禁用不会擦除小时配置**：`*_hours` 原样保留，改回 `true` 即恢复原时点，无需补配。
-- **小时值必须是 0-23**：写了 `-1`、`25` 之类的非法值会在启动时**直接报错**并提示改用
-  开关（不做静默兜底，避免你以为关掉了、实际却在别的整点照常执行）。
-- 开关只影响**本进程的定时排程**，不改变池内冷却/熔断/禁用等既有状态机行为；
-  独立的一次性工具（`signin.sh` / `cmd/signin`）是另一个进程，不受本开关约束。
-- **关签到的连带影响**：签到的余额查询会「余额恢复即解冻」被硬冷却的账号（402 余额不足），
-  关掉后这类账号只能等硬冷却**次日 04:00 自然到期**才回到池中——当日余额回补不再提前解冻。
+- **为什么用独立开关，而不是把小时数组留空**：空数组与 `null` 一贯表示
+  **「未配置 → 回落默认」**，不是「禁用」。真正关闭请用 `*_enabled: false`。
+- **禁用不会擦除小时配置**：`*_hours` 原样保留，改回 `true` 即恢复原时点。
+- **小时值必须是 0-23**：非法值在启动时直接报错并提示改用开关（不做静默兜底）。
+- 开关只影响本进程的定时排程；独立的一次性工具（`signin.sh`）是另一个进程，不受约束。
+- **关签到的连带影响**：签到的余额查询会「余额恢复即解冻」被硬冷却的账号（402），
+  关掉后这类账号只能等硬冷却次日 04:00 自然到期回池。
 
 #### 活跃上报（独立排程）
 
-对池内每个可用账号在**`activity_hours`（默认 `[10]` 整点）发送一条对话活跃上报**
+对池内每个可用账号在 `activity_hours`（默认 `[10]` 整点）发送一条对话活跃上报
 （`POST /v2/report`，事件 `chat_request_send`，body 为数组，事件必须含 `userId`）：
 
-- **一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务**（领养前置，详见
-  [REPORT-active-map.md](REPORT-active-map.md)）。
-- **风控口径**：每号每天 1 次即可（`activity_hours` 单时点）。**不要**做成多时点高频上报——
-  日活跃奖励按天去重，重复上报无额外收益，只增加上游请求。
-- 服务端不校验 body 与真实会话一致性：`conversationId` 由调用方生成
-  （`wb2api-<ms>`），无需真实会话。
-- **限速**：账号间间隔 800ms（与旅行同口径），避免触发上游风控。
-- **关闭**：`schedule.activity_enabled: false`。
+- 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
+- 每号每天 1 次即可（`activity_hours` 单时点）：日活跃奖励按天去重，重复上报无额外收益
+- `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
+- 限速：账号间间隔 800ms（与旅行同口径）
+- 关闭：`schedule.activity_enabled: false`
+- 手动诊断/补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
 
 #### 猫猫旅行（独立排程）
 
-对池内每个可用账号在**`travel_hours`（默认 `[9]` 整点）单趟推进一次**，
-每趟只做一个动作，不轮询不等待：
-
-**`travel_hours` 默认 `[9]` 而非 `[9,21]`**：每日 1 次 depart 足够，09 点一趟即可；
-多时点 = 多次巡检状态机，claim 到站奖励更及时（可自行加密）。
+对池内每个可用账号在 `travel_hours`（默认 `[9]` 整点）单趟推进一次，
+每趟只做一个动作，不轮询不等待。每日 1 次 depart 足够；多时点 = 更及时的到站领奖，可自行加密。
 
 | 探测结果 | 动作 |
 |---|---|
@@ -346,14 +336,12 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `state=arrived` | 领取到站奖励（带 `record_id`） |
 | `state=traveling` / 今日已达上限 / 未知状态 | 跳过 |
 
-- **领养门槛**：conversation 门槛未达标时上游返回 HTTP 400 `first_buddy task not completed yet`，
-  属预期行为——**每账号每自然日只尝试一次**，失败后当日静默跳过，跨日（00:00 CST）自动重试；
-  记录仅存内存，进程重启后清零。门槛可用活跃上报（`activity_enabled`）解除。
-- **限速**：账号间间隔 800ms（46 个账号约 40s），避免触发上游风控。
-- **每自然日 1 次派出**：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关。
-- **失败隔离**：单个账号查询/动作失败只跳过该账号本轮，不中断其他账号；401 不做强刷
-  （token 刷新交 22:00 保活），失败信息按 `travel <uid>: <动作>: <错误>` 落日志。
-- **关闭**：`schedule.travel_enabled: false`。旅行已从签到剥离，关签到不再影响旅行。
+- 领养门槛未达标时上游返回 HTTP 400，每账号每自然日只尝试一次（跨日重试，记录仅存内存）；
+  门槛可用活跃上报解除
+- 限速：账号间间隔 800ms（46 个账号约 40s）
+- 每自然日 1 次派出：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关
+- 失败隔离：单账号失败只跳过该账号当趟；401 不强刷（token 刷新交保活时点）
+- 关闭：`schedule.travel_enabled: false`
 
 签到与保活配到同一小时（如都含 22 点）时，两类任务都会执行。
 
@@ -503,6 +491,7 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
+| `python3 scripts/probe_active.py` | 活跃上报手动诊断/补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
 
 ## 🛠️ 开发
 

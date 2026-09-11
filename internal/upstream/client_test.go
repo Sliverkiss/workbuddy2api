@@ -37,8 +37,12 @@ func TestClassify(t *testing.T) {
 		{200, `{"code":1,"msg":"model usage limit exceeded"}`, ErrSoftRate},
 		{200, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
 		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
-		// 反向锚定：不得回归。
-		{400, `Illegal API invocation from an unapproved channel`, ErrClient},
+		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
+		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
+		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		{400, `unapproved channel`, ErrContentBlocked},
+		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
+		{400, `bad request`, ErrClient},
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},

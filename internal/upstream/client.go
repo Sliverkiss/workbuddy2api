@@ -21,13 +21,14 @@ import (
 type ErrKind int
 
 const (
-	ErrNone        ErrKind = iota // 成功
-	ErrHardCredit                 // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                   // 429 软限流 → 短冷却
-	ErrSessionDead                // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                   // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                     // 5xx 上游故障
-	ErrClient                     // 其他 4xx / 业务错误
+	ErrNone           ErrKind = iota // 成功
+	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                      // 429 软限流 → 短冷却
+	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                        // 5xx 上游故障
+	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrClient                        // 其他 4xx / 业务错误
 )
 
 func (k ErrKind) String() string {
@@ -42,6 +43,8 @@ func (k ErrKind) String() string {
 		return "not_found"
 	case ErrServer:
 		return "server"
+	case ErrContentBlocked:
+		return "content_blocked"
 	case ErrClient:
 		return "client"
 	default:
@@ -89,6 +92,18 @@ var softRateMarkers = []string{
 
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
+// contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
+//
+// 定位：上游按逐字精确指纹审核，system 来源的模板句（如 Claude Code/Codex
+// 注入指令）触发 HTTP 400 + 以下文案。这是「误报」（合法流量被审核误杀），
+// 非账号问题——该账号余额健康、未限流、session 未死，故 ErrContentBlocked
+// 在 applyErrorPolicy 中不罚账号（无冷却/熔断/NoteError），改由网关降级重试。
+var contentBlockedMarkers = []string{
+	"blocked by security policy",
+	"unapproved channel",
+	"illegal api invocation",
+}
+
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 //
 // 判定顺序自「严」到「宽」，每层的先后都有语义依据：
@@ -133,7 +148,14 @@ func Classify(status int, body string) ErrKind {
 	if status >= 500 {
 		return ErrServer
 	}
+	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
+	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	if status >= 400 {
+		for _, m := range contentBlockedMarkers {
+			if strings.Contains(lower, m) {
+				return ErrContentBlocked
+			}
+		}
 		return ErrClient
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。

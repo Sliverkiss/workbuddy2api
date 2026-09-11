@@ -13,6 +13,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
@@ -31,6 +32,11 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+
+	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
+	PromptMode string
+	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
+	PromptText string
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -46,8 +52,9 @@ const ServiceName = "workbuddy2api"
 
 // Handler 主路由。
 type Handler struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg     Config
+	mux     *http.ServeMux
+	degrade degradeGate
 }
 
 // NewHandler 构建 handler。
@@ -60,6 +67,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
+	}
+	if cfg.PromptMode == "" {
+		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -272,6 +282,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 系统提示词改写（出站前、轮转前；每个请求一次）。
+	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
+	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
+	//   - passthrough 非降级期：透传客户端原始 system（不改写）。
+	degradedApplied := false
+	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
+		body = prompt.Rewrite(body, h.cfg.PromptText)
+	} else if h.cfg.PromptMode == "passthrough" && h.degrade.Active() {
+		body = prompt.Rewrite(body, prompt.Degraded)
+		degradedApplied = true
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
 		var acct *auth.Auth
@@ -336,6 +358,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if status >= 400 {
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
+			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
+			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
+			// 第二次仍被拦（用户内容本身触发审核）→ 走既有错误路径返回客户端。
+			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
+			if kind == upstream.ErrContentBlocked && h.cfg.PromptMode == "passthrough" && !degradedApplied {
+				h.degrade.Trigger()
+				body = prompt.Rewrite(body, prompt.Degraded)
+				degradedApplied = true
+				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
+				releaseHeld()
+				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				continue
+			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind)
 			fail(acct.UID)
@@ -412,6 +447,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
+	case upstream.ErrContentBlocked:
+		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
+		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 	}

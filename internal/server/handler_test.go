@@ -14,6 +14,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
@@ -1066,5 +1067,121 @@ func TestStatusRequiresAuth(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != 200 {
 		t.Errorf("healthz: code=%d", rec.Code)
+	}
+}
+
+// TestContentBlockedTriggersDegradedRetry passthrough 模式下首请求 400（11128 文案）
+// → 降级重试（Degraded）→ 200，客户端无感。验证第二次出站 body 为 Degraded。
+func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
+	// 记录每次出站请求体，断言第二次为 Degraded 文本。
+	var bodies [][]byte
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, raw)
+			// 首次（body 含原始 system）返回 400 内容拦截；后续返回 200。
+			if len(bodies) == 1 {
+				return &http.Response{
+					StatusCode: 400,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"code":11128,"msg":"blocked by security policy"}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200 after degraded retry)", rec.Code, rec.Body)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want 2 upstream calls (first 400 + retry), got %d", len(bodies))
+	}
+	// 第二次出站 body 的 messages 头部 system 内容应为 Degraded 文本。
+	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
+		t.Errorf("second body should contain Degraded prompt: %s", bodies[1])
+	}
+	if strings.Contains(string(bodies[1]), "原始指纹") {
+		t.Errorf("second body should not contain original system: %s", bodies[1])
+	}
+}
+
+// TestContentBlockedStickyDegraded 降级后新请求直达 Degraded（不再先撞 400）。
+func TestContentBlockedStickyDegraded(t *testing.T) {
+	var firstCall bool
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if !firstCall {
+			firstCall = true
+			return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	// 首请求触发降级 → 200。
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"x"},{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("first req code=%d", rec.Code)
+	}
+	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
+	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
+	// 用 degrade.Active() 直接断言粘性生效。
+	if !h.degrade.Active() {
+		t.Fatal("degrade should be active after trigger")
+	}
+}
+
+// TestContentBlockedCustomModeDoesNotDegrade custom 模式不触发降级重试
+// （custom 已用自有提示词替换，不应再有 system 来源误报；若仍 400 走既有错误路径）。
+func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: "SYS"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"old"},{"role":"user","content":"hi"}]}`)))
+	// custom 模式下 400 直接返回 503（所有账号轮转失败），不降级重试。
+	if rec.Code != 503 {
+		t.Fatalf("code=%d want 503 (custom does not degrade)", rec.Code)
+	}
+	if h.degrade.Active() {
+		t.Error("degrade should NOT be active in custom mode")
+	}
+}
+
+// TestContentBlockedDoesNotPenalizeAccount ErrContentBlocked 不罚账号（无冷却/熔断/NoteError）。
+func TestContentBlockedDoesNotPenalizeAccount(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":11128,"msg":"blocked by security policy"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	// 熔断阈值 1：若误罚 NoteError 一次即熔断；content_blocked 不应喂熔断。
+	p.SetBreaker(1, time.Hour, time.Hour)
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+
+	st, _ := p.Status("u1")
+	if st.Cooling || st.Disabled || st.ErrTotal != 0 {
+		t.Fatalf("ErrContentBlocked should not penalize account: %+v", st)
 	}
 }

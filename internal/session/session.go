@@ -269,10 +269,16 @@ func hashIndex(key string, n int) int {
 	return int(h % uint32(n))
 }
 
-// ExtractKey 从请求体提取会话键；按任务书给定顺序依次尝试，找不到返回空串（绝不失败）。
+// ExtractKey 从请求体提取会话键；按下列顺序依次尝试，找不到返回空串（绝不失败）。
 //  1. metadata.conversation_id
-//  2. conversation_id
-//  3. metadata.user_id
+//  2. metadata.conversationId
+//  3. conversation_id
+//  4. conversationId
+//  5. metadata.user_id
+//
+// issue #35：客户端实际发 camelCase 的 conversationId，此前只识别 snake_case，
+// 导致粘性路由不命中、同对话轮转不同账号、上游上下文缓存 miss。现两种命名均识别，
+// snake_case 优先级高于 camelCase（同值不同名命中同一对话时返回相同值，天然不混用）。
 func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -285,11 +291,17 @@ func ExtractKey(body []byte) string {
 		if v := strOrEmpty(meta["conversation_id"]); v != "" {
 			return v
 		}
+		if v := strOrEmpty(meta["conversationId"]); v != "" {
+			return v
+		}
 		if v := strOrEmpty(meta["user_id"]); v != "" {
 			return v
 		}
 	}
-	return strOrEmpty(obj["conversation_id"])
+	if v := strOrEmpty(obj["conversation_id"]); v != "" {
+		return v
+	}
+	return strOrEmpty(obj["conversationId"])
 }
 
 // strOrEmpty 把 JSON 字符串字段安全转 string（非字符串类型返回空）。

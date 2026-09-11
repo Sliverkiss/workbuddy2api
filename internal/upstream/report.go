@@ -22,42 +22,42 @@ const reportPath = "/v2/report"
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。
 // userId 为必填字段（= a.UID）；conversationId 由调用方生成，无需真实会话。
 type chatRequestEvent struct {
-	EventCode            string        `json:"eventCode"`
-	Timestamp            int64         `json:"timestamp"`
-	ReportDelay          int           `json:"reportDelay"`
-	Mode                 string        `json:"mode"`
-	ConversationID       string        `json:"conversationId"`
-	RequestID            string        `json:"requestId"`
-	InputLength          int           `json:"inputLength"`
-	RequestModelID       string        `json:"requestModelId"`
-	RequestModelName     string        `json:"requestModelName"`
-	IsPlan               bool          `json:"isPlan"`
-	IsAutoExecuteTerminal bool         `json:"isAutoExecuteTerminal"`
-	IsAutoModify         bool          `json:"isAutoModify"`
-	CodebaseEnable       bool          `json:"codebaseEnable"`
-	MaxToken             int           `json:"maxToken"`
-	MaxSteps             int           `json:"maxSteps"`
-	Temperature          int           `json:"temperature"`
-	MaxRetries           int           `json:"maxRetries"`
-	MentionContexts      []any         `json:"mentionContexts"`
-	KnowledgeID          []any         `json:"knowledgeId"`
-	KnowledgeName        []any         `json:"knowledgeName"`
-	CodebaseID           string        `json:"codebaseId"`
-	MentionContextCount  int           `json:"mentionContextCount"`
-	Command              string        `json:"command"`
-	ExpertID             string        `json:"expertId"`
-	RecommendID          string        `json:"recommendId"`
-	SkillID              string        `json:"skillId"`
-	SkillCount           int           `json:"skillCount"`
-	TotalCount           int           `json:"totalCount"`
-	FileURI              string        `json:"fileUri"`
-	PresentAt            int64         `json:"presentAt"`
-	TraceID              string        `json:"traceId"`
-	RootRequestID        string        `json:"rootRequestId"`
-	ParentConversationID string        `json:"parentConversationId"`
-	AgentName            string        `json:"agentName"`
-	AgentType            string        `json:"agentType"`
-	UserID               string        `json:"userId"`
+	EventCode             string `json:"eventCode"`
+	Timestamp             int64  `json:"timestamp"`
+	ReportDelay           int    `json:"reportDelay"`
+	Mode                  string `json:"mode"`
+	ConversationID        string `json:"conversationId"`
+	RequestID             string `json:"requestId"`
+	InputLength           int    `json:"inputLength"`
+	RequestModelID        string `json:"requestModelId"`
+	RequestModelName      string `json:"requestModelName"`
+	IsPlan                bool   `json:"isPlan"`
+	IsAutoExecuteTerminal bool   `json:"isAutoExecuteTerminal"`
+	IsAutoModify          bool   `json:"isAutoModify"`
+	CodebaseEnable        bool   `json:"codebaseEnable"`
+	MaxToken              int    `json:"maxToken"`
+	MaxSteps              int    `json:"maxSteps"`
+	Temperature           int    `json:"temperature"`
+	MaxRetries            int    `json:"maxRetries"`
+	MentionContexts       []any  `json:"mentionContexts"`
+	KnowledgeID           []any  `json:"knowledgeId"`
+	KnowledgeName         []any  `json:"knowledgeName"`
+	CodebaseID            string `json:"codebaseId"`
+	MentionContextCount   int    `json:"mentionContextCount"`
+	Command               string `json:"command"`
+	ExpertID              string `json:"expertId"`
+	RecommendID           string `json:"recommendId"`
+	SkillID               string `json:"skillId"`
+	SkillCount            int    `json:"skillCount"`
+	TotalCount            int    `json:"totalCount"`
+	FileURI               string `json:"fileUri"`
+	PresentAt             int64  `json:"presentAt"`
+	TraceID               string `json:"traceId"`
+	RootRequestID         string `json:"rootRequestId"`
+	ParentConversationID  string `json:"parentConversationId"`
+	AgentName             string `json:"agentName"`
+	AgentType             string `json:"agentType"`
+	UserID                string `json:"userId"`
 }
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
@@ -66,42 +66,42 @@ type chatRequestEvent struct {
 func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
 	now := time.Now().UnixMilli()
 	ev := chatRequestEvent{
-		EventCode:            "chat_request_send",
-		Timestamp:            now,
-		ReportDelay:          0,
-		Mode:                 "craft",
-		ConversationID:       conversationID,
-		RequestID:            conversationID,
-		InputLength:          12,
-		RequestModelID:       "deepseek-v4-flash",
-		RequestModelName:     "DeepSeek V4 Flash",
-		IsPlan:               false,
+		EventCode:             "chat_request_send",
+		Timestamp:             now,
+		ReportDelay:           0,
+		Mode:                  "craft",
+		ConversationID:        conversationID,
+		RequestID:             conversationID,
+		InputLength:           12,
+		RequestModelID:        "deepseek-v4-flash",
+		RequestModelName:      "DeepSeek V4 Flash",
+		IsPlan:                false,
 		IsAutoExecuteTerminal: false,
-		IsAutoModify:         false,
-		CodebaseEnable:       false,
-		MaxToken:             0,
-		MaxSteps:             0,
-		Temperature:          0,
-		MaxRetries:           0,
-		MentionContexts:      []any{},
-		KnowledgeID:          []any{},
-		KnowledgeName:        []any{},
-		CodebaseID:           "",
-		MentionContextCount:  0,
-		Command:              "",
-		ExpertID:             "",
-		RecommendID:          "",
-		SkillID:              "",
-		SkillCount:           0,
-		TotalCount:           0,
-		FileURI:              "",
-		PresentAt:            now,
-		TraceID:              "",
-		RootRequestID:        conversationID,
-		ParentConversationID: conversationID,
-		AgentName:            "default",
-		AgentType:            "conversation",
-		UserID:               a.UID,
+		IsAutoModify:          false,
+		CodebaseEnable:        false,
+		MaxToken:              0,
+		MaxSteps:              0,
+		Temperature:           0,
+		MaxRetries:            0,
+		MentionContexts:       []any{},
+		KnowledgeID:           []any{},
+		KnowledgeName:         []any{},
+		CodebaseID:            "",
+		MentionContextCount:   0,
+		Command:               "",
+		ExpertID:              "",
+		RecommendID:           "",
+		SkillID:               "",
+		SkillCount:            0,
+		TotalCount:            0,
+		FileURI:               "",
+		PresentAt:             now,
+		TraceID:               "",
+		RootRequestID:         conversationID,
+		ParentConversationID:  conversationID,
+		AgentName:             "default",
+		AgentType:             "conversation",
+		UserID:                a.UID,
 	}
 	raw, err := json.Marshal([]chatRequestEvent{ev})
 	if err != nil {

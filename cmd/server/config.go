@@ -29,8 +29,8 @@ type Config struct {
 
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-		TravelHours   []int `json:"travel_hours"`     // [9]
-		ActivityHours []int `json:"activity_hours"`   // [10]
+		TravelHours    []int `json:"travel_hours"`    // [9]
+		ActivityHours  []int `json:"activity_hours"`  // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
 		//
@@ -41,8 +41,8 @@ type Config struct {
 		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
 		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
 		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-		TravelEnabled   bool `json:"travel_enabled"`     // 缺省 true；false = 完全停猫猫旅行
-		ActivityEnabled bool `json:"activity_enabled"`   // 缺省 true；false = 停活跃上报
+		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
+		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。

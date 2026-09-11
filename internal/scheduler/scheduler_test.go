@@ -58,11 +58,11 @@ func TestNextWakeKeepaliveOnly(t *testing.T) {
 // TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
 func TestNextWakeSameInstantFiresAll(t *testing.T) {
 	s := New(Config{
-		CheckinHours:   []int{9, 22},
-		TravelHours:    []int{},  // 禁用旅行时点干扰（仅测签到+保活同整点）
-		ActivityHours:  []int{},  // 禁用活跃时点干扰
-		KeepaliveHours: []int{22},
-		TravelDisabled: true,
+		CheckinHours:     []int{9, 22},
+		TravelHours:      []int{}, // 禁用旅行时点干扰（仅测签到+保活同整点）
+		ActivityHours:    []int{}, // 禁用活跃时点干扰
+		KeepaliveHours:   []int{22},
+		TravelDisabled:   true,
 		ActivityDisabled: true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
@@ -120,8 +120,8 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
-		TravelDisabled:   true,
-		ActivityDisabled: true,
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
@@ -153,8 +153,8 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 		Pool:              p,
 		Upstream:          up,
 		CheckinDisabled:   true,
-		TravelDisabled:   true,
-		ActivityDisabled: true,
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 	})
 

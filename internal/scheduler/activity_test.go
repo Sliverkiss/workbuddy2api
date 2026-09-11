@@ -171,9 +171,9 @@ func TestNextWakeActivityIndependent(t *testing.T) {
 // TestNextWakeTravelDisabled 旅行禁用后排程里不再有旅行时点（签到照常）。
 func TestNextWakeTravelDisabled(t *testing.T) {
 	s := New(Config{
-		CheckinHours:    []int{9, 21},
+		CheckinHours:   []int{9, 21},
 		TravelHours:    []int{9},
-		TravelDisabled:  true,
+		TravelDisabled: true,
 		KeepaliveHours: []int{22},
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
@@ -193,9 +193,9 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 func TestNextWakeActivityDisabled(t *testing.T) {
 	s := New(Config{
 		CheckinHours:     []int{9, 21},
-		ActivityHours:   []int{10},
+		ActivityHours:    []int{10},
 		ActivityDisabled: true,
-		KeepaliveHours:  []int{22},
+		KeepaliveHours:   []int{22},
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -209,8 +209,8 @@ func TestNextWakeActivityDisabled(t *testing.T) {
 // TestCheckinDisabledTravelStillRuns 签到禁用时旅行/活跃照跑（验收标准 2）。
 func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 	s := New(Config{
-		CheckinHours:     []int{9, 21},
-		CheckinDisabled:  true,
+		CheckinHours:    []int{9, 21},
+		CheckinDisabled: true,
 		TravelHours:     []int{9},
 		ActivityHours:   []int{10},
 		KeepaliveHours:  []int{22},
@@ -231,13 +231,13 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 func TestAllFourDisabledNoSpin(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
-		TravelDisabled:   true,
-		ActivityDisabled: true,
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		CheckinHours:     []int{9, 21},
-		TravelHours:      []int{9},
-		ActivityHours:    []int{10},
-		KeepaliveHours:   []int{22},
+		CheckinHours:      []int{9, 21},
+		TravelHours:       []int{9},
+		ActivityHours:     []int{10},
+		KeepaliveHours:    []int{22},
 	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {

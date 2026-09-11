@@ -5,8 +5,8 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"log"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -22,8 +22,8 @@ type Config struct {
 	Pool           *pool.Pool
 	Upstream       *upstream.Client
 	CheckinHours   []int // 默认 [9, 21]
-	TravelHours   []int // 默认 [9]
-	ActivityHours []int // 默认 [10]
+	TravelHours    []int // 默认 [9]
+	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
 
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。

@@ -119,13 +119,13 @@ func TestExtractKeyPriority(t *testing.T) {
 		{`{"metadata":{"conversation_id":123}}`, ""},                                           // 非字符串 → 空
 		{`not-json`, ""}, // 非法 JSON → 空
 		// issue #35：客户端实际发 camelCase conversationId，ExtractKey 必须识别。
-		{`{"conversationId":"abc"}`, "abc"},                                                       // 顶层 camelCase
-		{`{"metadata":{"conversationId":"abc"}}`, "abc"},                                         // metadata.camelCase
-		{`{"metadata":{"conversation_id":"snake","conversationId":"camel"}}`, "snake"},           // snake 优先于 camel
-		{`{"conversation_id":"snake","conversationId":"camel"}`, "snake"},                        // 顶层 snake 优先于 camel
-		{`{"conversationId":123}`, ""},                                                           // 数字 conversationId → 空
-		{`{"metadata":{"conversationId":456}}`, ""},                                               // metadata 数字 conversationId → 空
-		{`{"metadata":{"conversationId":"abc","user_id":"mu"}}`, "abc"},                           // camel conversationId 优先于 user_id
+		{`{"conversationId":"abc"}`, "abc"},                                            // 顶层 camelCase
+		{`{"metadata":{"conversationId":"abc"}}`, "abc"},                               // metadata.camelCase
+		{`{"metadata":{"conversation_id":"snake","conversationId":"camel"}}`, "snake"}, // snake 优先于 camel
+		{`{"conversation_id":"snake","conversationId":"camel"}`, "snake"},              // 顶层 snake 优先于 camel
+		{`{"conversationId":123}`, ""},                                                 // 数字 conversationId → 空
+		{`{"metadata":{"conversationId":456}}`, ""},                                    // metadata 数字 conversationId → 空
+		{`{"metadata":{"conversationId":"abc","user_id":"mu"}}`, "abc"},                // camel conversationId 优先于 user_id
 	}
 	for _, c := range cases {
 		if got := ExtractKey([]byte(c.body)); got != c.want {

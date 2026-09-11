@@ -275,7 +275,13 @@ curl -s http://localhost:7863/v1/chat/completions \
 | Session 失效 | body 含 `Offline user session not found` / `12153` | **永久禁用** | 人工重新登录 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
+| 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
 | 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
+
+请求体解析失败（`11101`）与内容拦截一样**不罚账号**：问题在请求内容而非账号健康，冷却好号只会
+增加下一次真正限流时的风险。`11101` 的上游 body 在 503 兜底文案中原样透传，便于排查。触发
+`11101` 的**网关侧截断已由 `server.max_body_mb` 的 413 消灭**——剩余的 11101 只可能是客户端
+发来的畸形 JSON，属客户端需自检。
 
 **熔断器**：所有冷却入口（429/404/402）与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
 

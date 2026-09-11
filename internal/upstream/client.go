@@ -28,6 +28,7 @@ const (
 	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                        // 5xx 上游故障
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -45,6 +46,8 @@ func (k ErrKind) String() string {
 		return "server"
 	case ErrContentBlocked:
 		return "content_blocked"
+	case ErrBadParams:
+		return "bad_params"
 	case ErrClient:
 		return "client"
 	default:
@@ -104,6 +107,12 @@ var contentBlockedMarkers = []string{
 	"illegal api invocation",
 }
 
+// badParamsMarkers 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
+// "Unmarshal chat params failed..."（code 11101）。这是"发给上游的 body 有问题"，
+// 与账号健康无关——不罚号，但仍轮转（commit B）。
+var badParamsMarkerMsg = "Unmarshal chat params failed"
+var badParamsMarkerCode = `"code":11101`
+
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 //
 // 判定顺序自「严」到「宽」，每层的先后都有语义依据：
@@ -155,6 +164,14 @@ func Classify(status int, body string) ErrKind {
 			if strings.Contains(lower, m) {
 				return ErrContentBlocked
 			}
+		}
+		// 请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）：
+		// 这是"发给上游的 body 有问题"。网关侧截断已由 413 消灭（issue #41 commit A），
+		// 剩余来源是客户端 JSON 本身畸形——换了账号照样 400，不该罚号（白白冷却好号）。
+		// 归 ErrBadParams：不冷却/不熔断/不计错，但**仍然轮转**（不同账号可能有不同的
+		// 模型权限，值得再试一次）。
+		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+			return ErrBadParams
 		}
 		return ErrClient
 	}

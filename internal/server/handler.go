@@ -434,11 +434,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // kind 是唯一权威分类（来自 upstream.Classify），此处不再按原始 status 二次判断。
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
 //
-// 五条路径，各司其职：
+// 七条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
 //   - ErrSoftRate → Cooldown(CoolSoft, soft_rate)：即时软冷却，连续触发指数退避（封顶 soft_rate_max）。
 //   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩，不随 soft_rate 退避。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
+//   - ErrContentBlocked → 不罚账号（无冷却/熔断/NoteError），passthrough 模式走降级重试。
+//   - ErrBadParams → 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇），但仍轮转。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断。
@@ -467,6 +469,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
 	case upstream.ErrContentBlocked:
 		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
+	case upstream.ErrBadParams:
+		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
+		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
+		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
+		// ——不同账号可能有不同的模型权限，值得换号再试一次。
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 	}

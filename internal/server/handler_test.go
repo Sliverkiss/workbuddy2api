@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,6 +108,89 @@ func testPoolWith(auths ...*auth.Auth) *pool.Pool {
 		p.SetCredits(a.UID, 1000)
 	}
 	return p
+}
+
+// TestChatBodyLimitExactAllowed 恰好等于上限的请求体正常放行到上游（不被 413 误伤）。
+func TestChatBodyLimitExactAllowed(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
+	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
+	const suffix = `"}`
+	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)) // 恰好 100 字节
+	if body := prefix + pad + suffix; len(body) != 100 {
+		t.Fatalf("fixture len=%d want 100", len(body))
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefix+pad+suffix)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (exactly-at-limit body must proceed)", rec.Code, rec.Body)
+	}
+	if calls != 1 {
+		t.Errorf("upstream calls=%d want 1", calls)
+	}
+}
+
+// TestChatOversizedBodyReturns413 请求体超过上限 → 直接 413 request_body_too_large：
+// 不打上游（calls=0）、不罚账号（无冷却/无熔断计数/无禁用）、不轮转。
+func TestChatOversizedBodyReturns413(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 100})
+	const prefix = `{"model":"glm-5.2","messages":[],"pad":"`
+	const suffix = `"}`
+	// 101 字节 > 100 上限。
+	pad := strings.Repeat("a", 100-len(prefix)-len(suffix)+1)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefix+pad+suffix)))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code=%d body=%s want 413", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "request_body_too_large") {
+		t.Errorf("body should carry request_body_too_large: %s", body)
+	}
+	if !strings.Contains(body, "server.max_body_mb") {
+		t.Errorf("413 message should name config key server.max_body_mb: %s", body)
+	}
+	if calls != 0 {
+		t.Errorf("upstream must not be called on 413, got %d", calls)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.Disabled || st.ErrTotal != 0 {
+		t.Errorf("413 must not penalize account: %+v", st)
+	}
+}
+
+// TestChatOversizedBodyDefaultLimitHeader 未显式设置 MaxBodyBytes 时兜底 8MB：
+// 8MB+1 的请求体必须 413（不再静默截断喂给上游，issue #41 根因）。
+func TestChatOversizedBodyDefaultLimit(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 MaxBodyBytes → 默认 8MB
+
+	body := make([]byte, 8<<20+1) // 8MB+1
+	copy(body, `{"model":"glm-5.2","messages":[]}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code=%d want 413 (8MB+1 must be rejected)", rec.Code)
+	}
+	if calls != 0 {
+		t.Errorf("upstream must not be called, got %d", calls)
+	}
 }
 
 func TestChatNonStreamAggregates(t *testing.T) {

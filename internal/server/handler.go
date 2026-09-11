@@ -4,6 +4,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -24,6 +25,9 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
+	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
+	MaxBodyBytes int64
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -70,6 +74,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
+	}
+	if cfg.MaxBodyBytes <= 0 {
+		cfg.MaxBodyBytes = 8 << 20 // 请求体上限兜底 8MB
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -231,9 +238,19 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	// 请求体上限：LimitReader 读 limit+1 以探测"超限"（读到 limit+1 字节即已超），
+	// 超限直接 413，不把截断的半截 JSON 喂给上游（issue #41：截断 body 让上游
+	// unmarshal 报 unexpected EOF，网关却罚号轮空）。
+	// 413 是网关侧的客户端问题，不打上游、不罚账号、不轮转。
+	limit := h.cfg.MaxBodyBytes
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		return
+	}
+	if int64(len(body)) > limit {
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
+			fmt.Sprintf("请求体超过 %d MB 上限：请压缩内容或调大 server.max_body_mb 配置后重试", limit>>20))
 		return
 	}
 	var peek struct {

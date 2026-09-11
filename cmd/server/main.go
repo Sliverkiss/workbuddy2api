@@ -139,6 +139,7 @@ func main() {
 		SoftCooldown: cfg.SoftRateDur,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

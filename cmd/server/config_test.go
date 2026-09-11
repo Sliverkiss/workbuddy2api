@@ -492,6 +492,63 @@ func TestBadSessionTTL(t *testing.T) {
 	}
 }
 
+// TestMaxBodyDefault 默认 max_body_mb=8。
+func TestMaxBodyDefault(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Server.MaxBodyMB != 8 {
+		t.Errorf("max_body_mb=%d want 8", c.Server.MaxBodyMB)
+	}
+}
+
+// TestMaxBodyExplicit 显式设置 max_body_mb。
+func TestMaxBodyExplicit(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":16}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.MaxBodyMB != 16 {
+		t.Errorf("max_body_mb=%d want 16", c.Server.MaxBodyMB)
+	}
+}
+
+// TestMaxBodyInvalid 非法值（0/负数）normalize 报错：0 想表达"不限"会被静默当成 8MB，
+// 与其误导不如 fail fast 提示显式配大上限。
+func TestMaxBodyInvalid(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		os.WriteFile(fp, []byte(`{"server":{"max_body_mb":`+v+`}}`), 0o600)
+		_, err := Load(fp)
+		if err == nil {
+			t.Fatalf("want error for max_body_mb=%s", v)
+		}
+		if !strings.Contains(err.Error(), "server.max_body_mb") {
+			t.Errorf("error should name config key server.max_body_mb: %v", err)
+		}
+	}
+}
+
+// TestMaxBodyEnvOverride env WB2A_MAX_BODY_MB 非空覆盖 JSON 值。
+func TestMaxBodyEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":4}}`), 0o600)
+	t.Setenv("WB2A_MAX_BODY_MB", "12")
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.MaxBodyMB != 12 {
+		t.Errorf("max_body_mb=%d want env 12", c.Server.MaxBodyMB)
+	}
+}
+
 // TestPromptDefaultCustom 默认 prompt.mode=custom 且 PromptText 为内置默认（非空）。
 func TestPromptDefaultCustom(t *testing.T) {
 	c, err := Load("")

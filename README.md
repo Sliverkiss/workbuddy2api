@@ -142,6 +142,7 @@ curl -s http://localhost:7863/v1/chat/completions \
   "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "server": { "max_body_mb": 8 },
   "cooldown": { "soft_rate": "600s", "soft_rate_max": "2h" },
   "schedule": {
     "checkin_hours": [9, 21],
@@ -173,6 +174,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
+| `server.max_body_mb` | `8` | 聊天请求体大小上限（MB，0/负数会启动报错）。超限直接返回 **413 `request_body_too_large`**，不再静默截断喂给上游（多图/超长上下文会话请调大此项） |
 | `listen` | `:7863` | HTTP 监听地址 |
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
@@ -218,7 +220,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool） · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool） · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
 ## 💬 系统提示词
 
@@ -377,7 +379,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 `server.max_body_mb`（默认 8 MB） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
@@ -433,6 +435,23 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 
 - 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`；`error` 帧原样透传
+
+## ❓ 常见问题
+
+### 多图会话请求体超限怎么办？
+
+请求体超过 `server.max_body_mb`（默认 8 MB）时网关直接返回：
+
+```json
+{"error":{"message":"请求体超过 8 MB 上限：请压缩内容或调大 server.max_body_mb 配置后重试","type":"api_error","code":"request_body_too_large"}}
+```
+
+- 该错误在**网关侧**判出，**不会**打上游、**不会**罚账号、**不会**轮转；
+- 收到 `413 request_body_too_large` 即表示是请求体本身超限（多图/超长上下文场景），
+  调大 `server.max_body_mb` 即可（`WB2A_MAX_BODY_MB` 环境变量同样生效）；
+- 历史版本的静默截断已废弃：此前 8M 截断会把半截 JSON 喂给上游触发
+  `Unmarshal chat params failed ... unexpected EOF`，网关却把责任记在账号头上
+  （罚号 + 轮转耗尽 503）——现在要么放行要么明确 413，不再"截断后误伤"。
 
 ## 📋 请求级日志
 

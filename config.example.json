@@ -3,6 +3,9 @@
   "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "server": {
+    "max_body_mb": 8
+  },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"

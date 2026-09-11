@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +113,54 @@ var contentBlockedMarkers = []string{
 // 与账号健康无关——不罚号，但仍轮转（commit B）。
 var badParamsMarkerMsg = "Unmarshal chat params failed"
 var badParamsMarkerCode = `"code":11101`
+
+// softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
+// 与容器时区无关）。
+var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
+
+// SoftRateResetLoc 暴露重置时间的固定时区（供测试构造/断言同一时区口径）。
+func SoftRateResetLoc() *time.Location { return softRateResetLoc }
+
+// modelRateLimitCode 明确指向「模型级 429 限流」的业务 code。
+// 上游用它表达"该模型的使用量超限"（code 6004，msg 带「将在 … 重置」），
+// 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
+const modelRateLimitCode = "6004"
+
+// softRateResetRe 匹配「将在 … 重置」，捕获中间的时间串。
+const softRateResetRe = `将在 (.+?) 重置`
+
+// softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
+const softRateTimeLayout = "2006-01-02 15:04:05"
+
+// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
+// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+func IsModelRateLimit(body string) bool {
+	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
+	re := regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	return re.MatchString(body)
+}
+
+// ParseSoftRateReset 从 429 body 解析「将在 … 重置」时间（上游 UTC+8 文案）。
+// 成功返回解析出的**墙钟时刻**（按 UTC+8 解释），失败返回零值 + false。
+// 内部先判 IsModelRateLimit：非模型级限流（非 6004）即使带"重置"字样也不返回——该重置
+// 无冷却语义（如 11140 的通用限流提示），解析出来反而会错误收窄冷却。
+func ParseSoftRateReset(body string) (time.Time, bool) {
+	if !IsModelRateLimit(body) {
+		return time.Time{}, false
+	}
+	re := regexp.MustCompile(softRateResetRe)
+	m := re.FindStringSubmatch(body)
+	if len(m) < 2 {
+		return time.Time{}, false
+	}
+	ts := strings.TrimSpace(m[1])
+	ts = strings.TrimSuffix(ts, " UTC+8") // 去掉后缀，固定按 softRateResetLoc 解释
+	t, err := time.ParseInLocation(softRateTimeLayout, ts, softRateResetLoc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 //

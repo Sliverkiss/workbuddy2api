@@ -829,6 +829,177 @@ func TestSoftStreakMissingInLegacyStateFile(t *testing.T) {
 	wantCoolSec(t, p, "u1", 600, 3)
 }
 
+// ---------------------------------------------------------------------------
+// issue #31：429 6004 模型级限流 → 按上游重置时间收窄冷却 + 模型级豁免选号
+// ---------------------------------------------------------------------------
+
+func TestCooldownSoftForModelParsedUntil(t *testing.T) {
+	// 6004 msg 带「将在 … 重置」→ until 精确等于解析时间（wall-clock 判断）。
+	// 用未来 5 分钟的时间戳：解析后 until ≈ now+5m，远短于固定 600s 基数的指数退避，
+	// 证明"上游明说重置时间"优先于"600s 起指数退避"。
+	reset := time.Now().Add(5 * time.Minute)
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
+	st, ok := p.Status("u1")
+	if !ok || st.CoolKind != "soft_rate" {
+		t.Fatalf("want soft_rate cooling: %+v ok=%v", st, ok)
+	}
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v (diff %v)", st.Until, reset, d)
+	}
+}
+
+func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
+	// 解析时间超出 soft_rate_max → 截断到 soft_rate_max（不无限期拉黑）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(10 * time.Minute)
+	reset := time.Now().Add(2 * time.Hour) // 远超过封顶 10m
+	before := time.Now()
+	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
+	st, _ := p.Status("u1")
+	if st.Until.Sub(before) > 10*time.Minute+time.Second {
+		t.Errorf("until=%v want capped at soft_rate_max=10m", st.Until)
+	}
+}
+
+func TestCooldownSoftForModelNoResetFallbackBackoff(t *testing.T) {
+	// 无解析时间（resetAt 零值）→ 退回 600s 起指数退避（现状不动）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetSoftRateMax(time.Hour)
+	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "", "429 rate limit")
+	wantCoolSec(t, p, "u1", 600, 3)
+	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "", "429 rate limit")
+	wantCoolSec(t, p, "u1", 1200, 3)
+}
+
+// TestPickExcludingForModelSkipsSoftCoolingSameModel 冷却中账号（6004 带解析时间，
+// 已记录模型）+ 同 model 请求 → 仍不可选（现状语义保持）。
+func TestPickExcludingForModelSkipsSoftCoolingSameModel(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 1000)
+	p.SetCredits("u2", 1)
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	got := p.PickExcludingForModel(nil, "glm-5.3")
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("same-model request must skip cooling u1, got %+v", got)
+	}
+}
+
+// TestPickExcludingForModelAllowsDifferentModel 6004 冷却中的账号 + 不同 model
+// → 视为可用，可选到该号（真·单模型限流，切模型立即可用）。
+func TestPickExcludingForModelAllowsDifferentModel(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 1000)
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u2", 1)
+	p.SetRandomSource(func(n int64) int64 { return 0 }) // r=0 → 最高分 u1
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	got := p.PickExcludingForModel(nil, "hy3-x")
+	if got == nil || got.UID != "u1" {
+		t.Fatalf("different-model request should bypass u1 soft cooling, got %+v", got)
+	}
+}
+
+// TestCooldownSoftWithoutModelRecordsNone 非 6004 的普通软冷却（resetAt 零值，
+// 不记录 softRateModel）→ 不因模型切换而豁免（现状语义）。
+func TestCooldownSoftWithoutModelRecordsNone(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 1000)
+	p.SetCredits("u2", 1)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.CooldownSoftForModel("u1", time.Minute, time.Time{}, "", "429 rate limit")
+	// 冷却中 + 不同 model 请求仍跳过 u1（无 softRateModel，不豁免）。
+	got := p.PickExcludingForModel(nil, "hy3-x")
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("no model recorded → must not bypass, got %+v", got)
+	}
+}
+
+// TestPickExcludingForModelBreakerStillBlocks 模型豁免只豁免软冷却维度，
+// 熔断（breakerUntil）仍拦截：6004 冷却 + 熔断中的账号，切模型也不可选。
+func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 1000)
+	p.SetCredits("u2", 1)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	p.SetBreaker(1, time.Hour, time.Hour)
+	p.NoteError("u1") // u1 熔断
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	got := p.PickExcludingForModel(nil, "hy3-x")
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("breaker must still block, got %+v", got)
+	}
+}
+
+// TestSoftRateModelClearedByPlainCooldown 回归：6004 模型冷却后，若账号又经历一次
+// **非模型级**软冷却（plain Cooldown），softRateModel 必须被清空——否则上次 6004 的
+// 模型豁免会泄漏到本次账号级限流上，导致"换模型请求"错误绕过本次冷却。
+func TestSoftRateModelClearedByPlainCooldown(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 1000)
+	p.SetCredits("u2", 1)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+
+	// 1) 6004 带解析时间 → 记录模型 glm-5.3。
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "u1" {
+		t.Fatalf("precondition: different-model should bypass, got %+v", got)
+	}
+	// 2) 账号恢复后经历普通账号级软冷却（无模型语义）。
+	p.NoteSuccess("u1") // 还原 fresh 状态（Cooldown 会重设 until）
+	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
+	// 3) 换模型请求不得再豁免（softRateModel 已清空）。
+	got := p.PickExcludingForModel(nil, "hy3-x")
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("plain cooldown must clear softRateModel (no bypass), got %+v", got)
+	}
+}
+
+// TestSoftRateModelNotPersistedToState 新字段 softRateModel 缺省空 = 现状兼容：
+// 旧 state.json 不写它也能正常加载；落盘不引入该字段（运行态语义，重启即清零）。
+func TestSoftRateModelNotPersistedToState(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownSoftForModel("u1", time.Minute, time.Now(), "glm-5.3", "429 rate limit")
+	p.Flush()
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "soft_rate_model") {
+		t.Errorf("state.json should not persist soft_rate_model (runtime-only):\n%s", raw)
+	}
+	// 重载后账号仍在冷却（until 持久化），softRateModel 清零。
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok || !st.Cooling {
+		t.Fatalf("cooldown should persist after reload: %+v ok=%v", st, ok)
+	}
+	p2.mu.RLock()
+	em := p2.byUID["u1"].softRateModel
+	p2.mu.RUnlock()
+	if em != "" {
+		t.Errorf("softRateModel should reset on reload, got %q", em)
+	}
+}
+
 func TestList(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1", Nickname: "nick1"})

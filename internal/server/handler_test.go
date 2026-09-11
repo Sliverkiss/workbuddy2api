@@ -395,7 +395,7 @@ func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
 	for i, want := range []int64{600, 1200, 2400} {
-		h.applyErrorPolicy("u1", upstream.ErrSoftRate)
+		h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "")
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
 			t.Fatalf("call %d: 应为 soft_rate 冷却: %+v", i+1, st)
@@ -422,7 +422,7 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 
 	notFoundSec := int64(notFoundCooldown / time.Second)
 	for i, want := range []int64{notFoundSec, 2 * notFoundSec, 4 * notFoundSec} {
-		h.applyErrorPolicy("u1", upstream.ErrNotFound)
+		h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "")
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
 			t.Fatalf("call %d: 应为 soft 冷却: %+v", i+1, st)
@@ -440,7 +440,7 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	// 成功后 streak 归零 → 下次 404 回到 60s 基数。
 	// （签到解冻 ReenableIfCredits 不适用于本场景：它保留 streak，是冷却域的续期。）
 	p.NoteSuccess("u1")
-	h.applyErrorPolicy("u1", upstream.ErrNotFound)
+	h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "")
 	if st, _ := p.Status("u1"); st.SoftStreak != 1 || st.CoolRemaining > notFoundSec {
 		t.Errorf("success should reset 404 backoff: %+v", st)
 	}
@@ -619,6 +619,92 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	stGood, _ := p.Status("good")
 	if stGood.Cooling || stGood.Disabled {
 		t.Errorf("good should stay healthy: %+v", stGood)
+	}
+}
+
+// TestChat6004ModelResetCoolsToParsedTime 端到端回归 issue #31：上游 429 + code 6004
+// +「将在 … 重置」→ 冷却 until 精确等于解析时间（而非 600s 固定基数/指数退避），
+// 且记录触发模型 → 同模型请求仍被冷却、切模型请求按豁免可选。
+func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
+	// 用未来 5 分钟的重置时间（wall-clock）构造上游响应。
+	reset := time.Now().Add(5 * time.Minute)
+	ts := reset.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000)
+	p.SetCredits("good", 1000)
+	// 隔离对 breaker 的干扰：熔断阈值默认 3，一次失败不触发。
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
+	}
+	// bad 已进入 soft 冷却，until ≈ reset。
+	st, _ := p.Status("bad")
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("bad should be soft cooling from 6004: %+v", st)
+	}
+	if d := st.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("until=%v want ~reset=%v (diff %v)", st.Until, reset, d)
+	}
+	// 记录触发模型（bad 池内 private 字段需经 Status 不可见，改用行为断言）：
+	// 同模型 glm-5.3 的请求不应选中 bad（仍冷却）；
+	// 不同模型 hy3-x 的请求应豁免冷却选中 bad（最高分）。
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	same := p.PickExcludingForModel(nil, "glm-5.3")
+	if same == nil || same.UID != "good" {
+		t.Fatalf("same-model pick should skip bad (still cooling), got %+v", same)
+	}
+	diff := p.PickExcludingForModel(nil, "hy3-x")
+	if diff == nil || diff.UID != "bad" {
+		t.Fatalf("different-model pick should bypass bad soft cooling, got %+v", diff)
+	}
+}
+
+// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
+// （现状不变）。
+func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+	var calls int
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":6004,"msg":"model usage limit exceeded"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000)
+	p.SetCredits("good", 1000)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("bad")
+	if !st.Cooling || st.CoolKind != "soft_rate" {
+		t.Fatalf("bad should be soft cooling: %+v", st)
+	}
+	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
+	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
+		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
 	}
 }
 

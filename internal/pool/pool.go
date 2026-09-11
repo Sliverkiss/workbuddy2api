@@ -92,6 +92,11 @@ type entry struct {
 	// 持久化（stateAccount.SoftStreak）：重启后软限流仍在退避，不因重启回到基数。
 	softStreak int
 
+	// softRateModel 触发 6004 模型级限流时的模型名（issue #31 模型豁免）。
+	// 仅当冷却由「带解析时间的 6004」触发时记录；空 = 普通软冷却（不豁免）。
+	// 运行态语义（不持久化）：重启清零，退化为现状。
+	softRateModel string
+
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
 }
@@ -108,6 +113,19 @@ func (e *entry) healthy(now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// healthyForModel 报告账号对指定 model 是否可选（含模型级豁免）：
+// 冷却为由 6004 触发的**模型级**软冷却（softRateModel 非空）且请求模型不同
+// （softRateModel != reqModel）时，跳过冷却判定——该模型限流不代表账号在其他
+// 模型下不可用（issue #31）。空 reqModel / 未记录模型 / 同模型 → 与 healthy 一致。
+func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
+	if !e.healthy(now) && reqModel != "" && e.softRateModel != "" &&
+		e.coolKind == CoolSoft && e.softRateModel != reqModel {
+		// 非 healthy 但属于可豁免场景：仍受 disabled/breakerUntil 约束。
+		return !e.disabled && e.breakerUntil.IsZero()
+	}
+	return e.healthy(now)
 }
 
 // expiry 返回账号当前仍在生效的最近冷却/熔断截止时间（两个截止取较早者）；不在冷却期返回零值。
@@ -470,7 +488,14 @@ func (p *Pool) Pick() *auth.Auth {
 // 挑选策略：healthy 账号中按三因子权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried)
+	return p.pick(tried, "")
+}
+
+// PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
+// 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
+// reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
+func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
+	return p.pick(tried, reqModel)
 }
 
 // pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
@@ -479,17 +504,24 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 // 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
 // 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
 // minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
-func (p *Pool) pick(tried map[string]bool) *auth.Auth {
+// reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效；PickExcluding 传 ""）。
+// 注意：模型豁免只进 normal 选号（候选 healthy 判定）；全冷却兜底不参与模型豁免——
+// 兜底本来就是在"无任何 direct 可用"时的降级，切模型可用性已在 normal 阶段体现。
+func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 
+	healthyOf := func(e *entry) bool { return e.healthy(now) }
+	if reqModel != "" {
+		healthyOf = func(e *entry) bool { return e.healthyForModel(now, reqModel) }
+	}
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if !e.healthy(now) {
+		if !healthyOf(e) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -715,9 +747,70 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
+		// 非模型级冷却入口：清空 6004 模型豁免痕迹，避免上一次模型级限流的
+		// softRateModel 泄漏到本次**账号级**限流上（否则换模型请求会错误绕过本次冷却）。
+		e.softRateModel = ""
 		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
 		p.dirty.Store(true)
 	}
+}
+
+// CooldownSoftForModel 429 的**模型级**软冷却入口（issue #31）。
+// 区别于 Cooldown：当上游 6004 明说「将在 … 重置」时，把冷却截止精确设为
+// resetAt（上游给定时间，不再靠固定基数+指数退避猜测），并记录触发模型 softRateModel，
+// 后续该模型被豁免冷却（切模型立即可用，见 healthyForModel）。
+//
+// 收窄规则：
+//   - resetAt 非零（6004 带解析时间）→ until = min(resetAt, now+softRateMax)，
+//     softRateModel = model。指数退避**不适用**：重置时间已是上游权威，再指数放大
+//     会无视它明说的恢复时刻（这恰是本 issue 的核心痛点）。
+//   - resetAt 零值（6004 无时间文案 / 非 6004 的 soft）→ 完全退回 Cooldown 现状
+//     （soft_streak 指数退避 + 封顶 soft_rate_max），softRateModel 保持空（不豁免）。
+//
+// 熔断信号照旧喂入（冷却与熔断正交，行为与 Cooldown 一致）；softStreak 仍递增
+// （无论是否命中解析时间），single 一致性由 Cooldown 之外的语义保证：解析时间的
+// 冷却**不**参与指数退避，但 softStreak 计数照常累加，后续无时间的 6004 从当前
+// streak 继续退避——与任务书「指数退避逻辑保持不变，只在两个点收窄」的口径一致。
+func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.softStreak++
+		hasReset := !resetAt.IsZero()
+		d := p.softDurationLocked(base, e.softStreak)
+		if hasReset {
+			// 有上游重置时间：直接取 min(重置墙钟, now+softRateMax)，不做指数放大。
+			now := time.Now()
+			cap := now.Add(p.softRateMaxOr())
+			if resetAt.After(cap) {
+				d = cap.Sub(now)
+			} else if resetAt.After(now) {
+				d = resetAt.Sub(now)
+			} else {
+				// 重置时间已过（时钟偏移/文案过期）：冷却极短，立即恢复。
+				d = time.Millisecond
+			}
+		}
+		e.until = time.Now().Add(d)
+		e.coolKind = CoolSoft
+		e.reason = reason
+		if hasReset {
+			e.softRateModel = model // 仅带解析时间的 6004 才记录模型（豁免画界）
+		} else {
+			e.softRateModel = ""
+		}
+		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
+		p.dirty.Store(true)
+	}
+}
+
+// softRateMaxOr 返回生效的 softRateMax（未注入时按默认 2h），供封顶计算。
+// 调用方必须已持有 p.mu。
+func (p *Pool) softRateMaxOr() time.Duration {
+	if p.softRateMax > 0 {
+		return p.softRateMax
+	}
+	return defaultSoftRateMax
 }
 
 // softDurationLocked 按连续软冷却次数把基数 d 指数放大：d << (streak-1)，封顶 softRateMax。
@@ -807,6 +900,7 @@ func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.coolKind = 0
 	e.reason = ""
 	e.softStreak = 0
+	e.softRateModel = "" // 冷却域清零时一并清模型豁免痕迹
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。

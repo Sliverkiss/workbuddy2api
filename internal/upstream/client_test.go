@@ -66,6 +66,64 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+func TestIsModelRateLimit(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		// 6004：模型级限流（issue #31 的核心场景）。
+		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
+		{`{"code": 6004,"msg":"x"}`, true},
+		// 其他 code（非模型级限流）→ 不算。
+		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
+		{`{"code":1,"msg":"429 rate limit"}`, false},
+	}
+	for _, c := range cases {
+		if got := IsModelRateLimit(c.body); got != c.want {
+			t.Errorf("IsModelRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestParseSoftRateReset 解析上游 429 6004 msg 里的「将在 … 重置」时间（## UTC+8）。
+func TestParseSoftRateReset(t *testing.T) {
+	future := time.Now().Add(35 * time.Minute)
+	ts := future.In(softRateResetLoc).Format("2006-01-02 15:04:05")
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"6004 带时间+UTC+8 后缀", `{"code":6004,"msg":"将在 ` + ts + ` UTC+8 重置"}`, true},
+		{"6004 带时间无后缀", `{"code":6004,"msg":"将在 ` + ts + ` 重置"}`, true},
+		{"6004 无时间文案", `{"code":6004,"msg":"model usage limit exceeded"}`, false},
+		{"非 6004 但带时间（不是模型级）", `{"code":11140,"msg":"将在 ` + ts + ` UTC+8 重置"}`, false},
+		{"非法时间格式", `{"code":6004,"msg":"将在 明天 重置"}`, false},
+		{"空 body", ``, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ParseSoftRateReset(c.body)
+			if ok != c.ok {
+				t.Fatalf("ok=%v want %v (body=%s)", ok, c.ok, c.body)
+			}
+			if ok {
+				// 解析结果 = ts 在 UTC+8 解释下的墙钟（截断到分钟），应与 future 相差 ±2 分钟。
+				if d := got.Sub(future); d < -2*time.Minute || d > 2*time.Minute {
+					t.Errorf("parsed=%v want ~%v (diff %v)", got, future, d)
+				}
+				if got.Location() != time.UTC {
+					// 不同指针的 FixedZone 实例相等性按 offset 判，这里只断言 offset。
+					if _, off := got.Zone(); off != 8*60*60 {
+						t.Errorf("zone offset=%d want +08:00", off)
+					}
+				}
+			}
+		})
+	}
+}
+
 type rtFunc func(*http.Request) (*http.Response, error)
 
 func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

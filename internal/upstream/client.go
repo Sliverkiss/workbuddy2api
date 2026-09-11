@@ -438,12 +438,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	origin := originRefererFor(a)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", c.userAgent())
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err

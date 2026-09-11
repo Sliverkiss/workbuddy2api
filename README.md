@@ -139,7 +139,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 ```json
 {
   "listen": ":7863",
-  "api_key": "your-api-key-here",
+  "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": { "max_body_mb": 8 },

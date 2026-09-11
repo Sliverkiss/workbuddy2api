@@ -321,6 +321,13 @@ func (c *Client) billingBase(a *auth.Auth) string {
 	return c.BillingBaseCN
 }
 
+// billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
+// 统一走 billingJSON 发请求。
+const (
+	billingMeterPath = "/v2/billing/meter/get-user-resource"
+	dailyCheckinPath = "/v2/billing/meter/daily-checkin"
+)
+
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	resp, err := c.HTTP.Do(req)
@@ -535,7 +542,6 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
-	url := c.billingBase(a) + "/v2/billing/meter/get-user-resource"
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber":               1,
@@ -545,13 +551,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return 0, err
-	}
-	c.BillingHeaders(req, a)
-	data, err := c.doJSON(req)
+	data, err := c.billingJSON(a, http.MethodPost, billingMeterPath, body)
 	if err != nil {
 		return 0, err
 	}
@@ -593,13 +593,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	url := c.billingBase(a) + "/v2/billing/meter/daily-checkin"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return err
-	}
-	c.BillingHeaders(req, a)
-	_, err = c.doJSON(req)
+	_, err := c.billingJSON(a, http.MethodPost, dailyCheckinPath, map[string]any{})
 	return err
 }
 

@@ -10,6 +10,7 @@ package upstream
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -18,6 +19,26 @@ import (
 
 // reportPath 活跃上报通道（实测）。
 const reportPath = "/v2/report"
+
+// billingJSON 发 billing 域（billingBase，codebuddy.cn）请求并解信封；body 为 nil 时不带请求体。
+// 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
+// report/checkin 等 billing 端点共用：请求头统一 BillingHeaders，信封与错误语义同 doJSON。
+func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	var rdr io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		rdr = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, c.billingBase(a)+path, rdr)
+	if err != nil {
+		return nil, err
+	}
+	c.BillingHeaders(req, a)
+	return c.doJSON(req)
+}
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。
 // userId 为必填字段（= a.UID）；conversationId 由调用方生成，无需真实会话。
@@ -107,11 +128,6 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+reportPath, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	c.BillingHeaders(req, a)
-	_, err = c.doJSON(req)
+	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
 	return err
 }

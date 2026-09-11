@@ -14,7 +14,6 @@ RUN apk add --no-cache wget ca-certificates tzdata \
 USER app
 WORKDIR /app
 COPY --from=build /out/wb2api /app/wb2api
-COPY config.json /app/config.json
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1

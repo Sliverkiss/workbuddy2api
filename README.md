@@ -16,6 +16,19 @@
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
 </p>
 
+- 🔐 **OAuth 登录** — 通过 `/v2/plugin/auth/state` 设备授权流程获取凭证，支持 token 自动刷新
+- 🔄 **多账号轮转** — 三因子加权随机选号（credits ×闲置×成功率），防热点 + 防惊群（100ms 窗口）
+- 🛠 **工具调用** — 完整支持 OpenAI tools/tool_choice，流式 `tool_calls` 按 index 合并
+- 📡 **流式 + 非流式** — 上游 SSE 透传；非流式本地聚合（上游拒绝非流式请求）
+- ⏰ **定时签到** — 每日 09:00 / 21:00 自动签到 + 积分查询，积分耗尽账号次日 04:00 自动恢复
+- 📊 **积分监控** — `credit.sh` 一键查询全部账号剩余/总量/百分比
+- 🔑 **登录工具** — `login.sh` 交互式登录，落盘即生效
+- 🏗 **Docker 部署** — 一键 `docker compose up`，healthcheck 常驻
+- 📈 **请求级日志** — 每个 `/v1/chat/completions` 请求打表格日志（seq/TTFB/uid/tokens/latency）
+- 🏥 **健康检查** — `/healthz` 无健康账号时返回 503，可接负载均衡器
+- 📉 **状态汇总** — `/status` 返回 total/healthy/cooling/disabled 计数 + 每账号完整画像
+- 🧭 **管理页面** — `/admin` 查看账号、发起 OAuth 登录、删除凭证，完成后热加载无需重启
+
 ---
 
 ## 📖 项目简介
@@ -130,6 +143,42 @@ curl -s http://localhost:7863/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
+
+### 管理凭证
+
+打开 `http://localhost:7863/admin`，输入与 API 相同的 Bearer key，即可查看账号、添加 OAuth
+凭证或删除凭证。管理 API 始终复用 `api_key`；公网部署建议再用 TinyAuth 只保护
+`/admin`，并明确让 `/v1/*`、`/status`、`/healthz` 绕过 TinyAuth。
+
+OAuth 完成后账号会直接热加载到运行中的池，无需重启容器。
+
+### Hermes Agent 会话粘性
+
+Hermes 默认不会把内部 session id 放入 OpenAI 请求体。启动 Hermes 时开启已有的 session
+标识注入：
+
+```bash
+hermes --pass-session-id
+```
+
+TUI/桌面网关可设置：
+
+```bash
+export HERMES_TUI_PASS_SESSION_ID=1
+```
+
+服务会从开头的 system/developer prompt 中识别 `Session ID: ...`，并以它作为粘性会话键。
+显式的 `metadata.conversation_id` / `conversation_id` 仍具有更高优先级。
+
+### GHCR 镜像
+
+仓库内 GitHub Actions 会运行测试并发布单架构 `linux/amd64` 镜像：
+
+```text
+ghcr.io/<fork-owner>/workbuddy2api:latest
+```
+
+workflow 不启用 QEMU，也不构建 `linux/arm64`。
 
 ## ⚙️ 配置说明
 

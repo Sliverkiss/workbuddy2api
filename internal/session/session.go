@@ -12,6 +12,7 @@ package session
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -285,11 +286,50 @@ func ExtractKey(body []byte) string {
 		if v := strOrEmpty(meta["conversation_id"]); v != "" {
 			return v
 		}
+	}
+	if v := strOrEmpty(obj["conversation_id"]); v != "" {
+		return v
+	}
+	if v := strOrEmpty(obj["session_id"]); v != "" {
+		return "session:" + v
+	}
+	if meta, ok := obj["metadata"].(map[string]any); ok {
 		if v := strOrEmpty(meta["user_id"]); v != "" {
 			return v
 		}
 	}
-	return strOrEmpty(obj["conversation_id"])
+	// Hermes Agent can expose its stable session identifier in the leading
+	// system/developer prompt via --pass-session-id / HERMES_TUI_PASS_SESSION_ID=1.
+	if messages, ok := obj["messages"].([]any); ok {
+		for _, raw := range messages {
+			msg, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			role := strOrEmpty(msg["role"])
+			if role != "system" && role != "developer" {
+				break
+			}
+			if id := hermesSessionID(strOrEmpty(msg["content"])); id != "" {
+				return "hermes:" + id
+			}
+		}
+	}
+	return ""
+}
+
+func hermesSessionID(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Session ID:") {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(line, "Session ID:"))
+		if id != "" && !strings.ContainsAny(id, " \t") {
+			return id
+		}
+	}
+	return ""
 }
 
 // strOrEmpty 把 JSON 字符串字段安全转 string（非字符串类型返回空）。

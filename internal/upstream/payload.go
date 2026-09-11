@@ -32,6 +32,9 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	// DeepSeek 思维链开关（见 thinking.go）：reasoning_effort 降级之后注入，
 	// 保证走降级链路的请求同样带上 thinking.type=enabled，思维链不丢。
 	injectThinking(obj)
+	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
+	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
+	backfillReasoningContent(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)

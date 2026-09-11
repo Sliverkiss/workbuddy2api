@@ -24,6 +24,67 @@ func isDeepSeekModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek")
 }
 
+// backfillReasoningContent DeepSeek 多轮一致性：历史 assistant 消息带 reasoning 痕迹时，
+// 上游要求后续请求所有 assistant 消息都带 reasoning_content 字段（string，可为空串）
+// ——即 requiresReasoningContentOnAssistantMessages（官方客户端 matches 规则）。
+//
+// 规则（对齐官方客户端逻辑）：
+//   - 会话内任一 assistant 消息带非空 reasoning（string）或已有 reasoning_content 字段
+//     → 所有 assistant 消息确保有 reasoning_content（string）：
+//       * reasoning 非空且无 reasoning_content → 复制 reasoning 值
+//       * 已有 reasoning_content → 原样保留（不覆盖）
+//       * 两者皆无 → 补空串 ""
+//   - 任何 assistant 均无 reasoning 痕迹 → 零改动（不白白加字段）。
+// 仅 deepseek 模型生效（thinkingFormat:deepseek + requiresReasoningContent）。
+func backfillReasoningContent(obj map[string]any) {
+	model, _ := obj["model"].(string)
+	if !isDeepSeekModel(model) {
+		return
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	// 第一遍：检测是否有任何 reasoning 痕迹（非空 reasoning 或已有 reasoning_content）。
+	hasTrace := false
+	for _, mm := range msgs {
+		msg, ok := mm.(map[string]any)
+		if !ok {
+			continue
+		}
+		if r, ok := msg["reasoning"].(string); ok && r != "" {
+			hasTrace = true
+			break
+		}
+		if _, ok := msg["reasoning_content"]; ok {
+			hasTrace = true
+			break
+		}
+	}
+	if !hasTrace {
+		return
+	}
+	// 第二遍：所有 assistant 消息补/复制 reasoning_content 字段。
+	for _, mm := range msgs {
+		msg, ok := mm.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		if _, ok := msg["reasoning_content"]; ok {
+			continue // 已有 → 不覆盖
+		}
+		if r, ok := msg["reasoning"].(string); ok {
+			msg["reasoning_content"] = r
+		} else {
+			msg["reasoning_content"] = ""
+		}
+	}
+}
+
 // injectThinking 按 DeepSeek 思维链开关规则改写请求体。非 deepseek 零改动。
 func injectThinking(obj map[string]any) {
 	model, _ := obj["model"].(string)

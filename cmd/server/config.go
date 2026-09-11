@@ -29,8 +29,10 @@ type Config struct {
 
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
+		TravelHours   []int `json:"travel_hours"`     // [9]
+		ActivityHours []int `json:"activity_hours"`   // [10]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		// CheckinEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
+		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
 		//   - 空数组与 null 在老语义里已被"未配置 → 回落默认"占用，改判会静默翻转
@@ -38,9 +40,11 @@ type Config struct {
 		//     则对老配置零影响，向后完全兼容。
 		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
 		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
-		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到（旅行随之停）
+		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
+		TravelEnabled   bool `json:"travel_enabled"`     // 缺省 true；false = 完全停猫猫旅行
+		ActivityEnabled bool `json:"activity_enabled"`   // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-		// 猫猫旅行已退役 travel_interval_minutes：派猫合并到签到时点执行（见 scheduler.RunCheckinNow）。
+		// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 	} `json:"schedule"`
 
@@ -98,10 +102,14 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Schedule.CheckinHours = []int{9, 21}
+	c.Schedule.TravelHours = []int{9}
+	c.Schedule.ActivityHours = []int{10}
 	c.Schedule.KeepaliveHours = []int{22}
-	// 开关「缺省 true」靠这两行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
+	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
+	c.Schedule.TravelEnabled = true
+	c.Schedule.ActivityEnabled = true
 	c.Schedule.KeepaliveEnabled = true
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
@@ -232,6 +240,12 @@ func (c *Config) normalize() error {
 	if len(c.Schedule.CheckinHours) == 0 {
 		c.Schedule.CheckinHours = []int{9, 21}
 	}
+	if len(c.Schedule.TravelHours) == 0 {
+		c.Schedule.TravelHours = []int{9}
+	}
+	if len(c.Schedule.ActivityHours) == 0 {
+		c.Schedule.ActivityHours = []int{10}
+	}
 	if len(c.Schedule.KeepaliveHours) == 0 {
 		c.Schedule.KeepaliveHours = []int{22}
 	}
@@ -248,6 +262,12 @@ func (c *Config) normalize() error {
 // （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
 func (c *Config) validateScheduleHours() error {
 	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", c.Schedule.CheckinHours); err != nil {
+		return err
+	}
+	if err := checkHourRange("schedule.travel_hours", "travel_enabled", c.Schedule.TravelHours); err != nil {
+		return err
+	}
+	if err := checkHourRange("schedule.activity_hours", "activity_enabled", c.Schedule.ActivityHours); err != nil {
 		return err
 	}
 	return checkHourRange("schedule.keepalive_hours", "keepalive_enabled", c.Schedule.KeepaliveHours)

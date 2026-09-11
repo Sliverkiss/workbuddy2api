@@ -268,8 +268,8 @@ func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	}
 }
 
-// TestScheduleEnabledByDefault 两个任务的 enabled 开关默认均为 true：
-// 老 config 不写这两个键，行为必须与从前完全一致（照常 9/21 签到、22 保活）。
+// TestScheduleEnabledByDefault 四个任务的 enabled 开关默认均为 true：
+// 老 config 不写这些键，行为必须与从前完全一致。
 func TestScheduleEnabledByDefault(t *testing.T) {
 	c := Default()
 	if err := c.normalize(); err != nil {
@@ -279,9 +279,20 @@ func TestScheduleEnabledByDefault(t *testing.T) {
 		t.Errorf("enabled defaults want true/true, got %v/%v",
 			c.Schedule.CheckinEnabled, c.Schedule.KeepaliveEnabled)
 	}
+	if !c.Schedule.TravelEnabled || !c.Schedule.ActivityEnabled {
+		t.Errorf("travel/activity enabled defaults want true/true, got %v/%v",
+			c.Schedule.TravelEnabled, c.Schedule.ActivityEnabled)
+	}
+	if len(c.Schedule.TravelHours) != 1 || c.Schedule.TravelHours[0] != 9 {
+		t.Errorf("travel_hours=%v want [9]", c.Schedule.TravelHours)
+	}
+	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
+		t.Errorf("activity_hours=%v want [10]", c.Schedule.ActivityHours)
+	}
 }
 
-// TestScheduleLegacyConfigKeepsRunning 老 config（只写小时数组）加载后仍是启用态。
+// TestScheduleLegacyConfigKeepsRunning 老 config（只写签到/保活小时数组，无新键）加载后仍是启用态，
+// 新开关缺省 true、新 hours 回落默认——对老配置零影响。
 func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -293,8 +304,18 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
 		t.Errorf("legacy config must stay enabled: %+v", c.Schedule)
 	}
+	if !c.Schedule.TravelEnabled || !c.Schedule.ActivityEnabled {
+		t.Errorf("new switches must default true on legacy config: %+v", c.Schedule)
+	}
 	if len(c.Schedule.CheckinHours) != 2 {
 		t.Errorf("checkin_hours=%v", c.Schedule.CheckinHours)
+	}
+	// 新 hours 缺省 → 回落默认（非空）。
+	if len(c.Schedule.TravelHours) != 1 || c.Schedule.TravelHours[0] != 9 {
+		t.Errorf("travel_hours=%v want default [9]", c.Schedule.TravelHours)
+	}
+	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
+		t.Errorf("activity_hours=%v want default [10]", c.Schedule.ActivityHours)
 	}
 }
 
@@ -320,6 +341,70 @@ func TestScheduleExplicitDisable(t *testing.T) {
 	}
 }
 
+// TestScheduleTravelActivityExplicitDisable 显式关闭旅行/活跃上报开关。
+func TestScheduleTravelActivityExplicitDisable(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"travel_enabled":false,"activity_enabled":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.TravelEnabled || c.Schedule.ActivityEnabled {
+		t.Errorf("want travel/activity disabled: %+v", c.Schedule)
+	}
+	// 签到/保活开关缺省 true（互不干扰）。
+	if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
+		t.Errorf("checkin/keepalive should stay enabled: %+v", c.Schedule)
+	}
+	// hours 仍回落默认。
+	if len(c.Schedule.TravelHours) != 1 || c.Schedule.TravelHours[0] != 9 {
+		t.Errorf("travel_hours=%v want default [9] even when disabled", c.Schedule.TravelHours)
+	}
+	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
+		t.Errorf("activity_hours=%v want default [10] even when disabled", c.Schedule.ActivityHours)
+	}
+}
+
+// TestScheduleTravelActivityInvalidHoursRejected 旅行/活跃非法小时报错并指向正确开关。
+func TestScheduleTravelActivityInvalidHoursRejected(t *testing.T) {
+	cases := []struct{ body, wantSwitch string }{
+		{`{"schedule":{"travel_hours":[25]}}`, "travel_enabled"},
+		{`{"schedule":{"travel_hours":[-1]}}`, "travel_enabled"},
+		{`{"schedule":{"activity_hours":[24]}}`, "activity_enabled"},
+		{`{"schedule":{"activity_hours":[-1]}}`, "activity_enabled"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		os.WriteFile(fp, []byte(tc.body), 0o600)
+		_, err := Load(fp)
+		if err == nil {
+			t.Fatalf("want error for %s", tc.body)
+		}
+		if !strings.Contains(err.Error(), tc.wantSwitch) {
+			t.Errorf("error for %s should point at schedule.%s: %v", tc.body, tc.wantSwitch, err)
+		}
+	}
+}
+
+// TestScheduleTravelActivityExplicitHours 显式配置旅行/活跃小时。
+func TestScheduleTravelActivityExplicitHours(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"travel_hours":[9,21],"activity_hours":[11]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Schedule.TravelHours) != 2 || c.Schedule.TravelHours[0] != 9 || c.Schedule.TravelHours[1] != 21 {
+		t.Errorf("travel_hours=%v want [9 21]", c.Schedule.TravelHours)
+	}
+	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 11 {
+		t.Errorf("activity_hours=%v want [11]", c.Schedule.ActivityHours)
+	}
+}
+
 // TestScheduleDisableKeepsExplicitHours 禁用不擦除用户配置的小时（便于原样恢复）。
 func TestScheduleDisableKeepsExplicitHours(t *testing.T) {
 	dir := t.TempDir()
@@ -342,8 +427,8 @@ func TestScheduleEmptyHoursFallsBackToDefault(t *testing.T) {
 	cases := map[string]string{
 		"absent":   `{}`,
 		"empty":    `{"schedule":{}}`,
-		"null":     `{"schedule":{"checkin_hours":null,"keepalive_hours":null}}`,
-		"emptyarr": `{"schedule":{"checkin_hours":[],"keepalive_hours":[]}}`,
+		"null":     `{"schedule":{"checkin_hours":null,"keepalive_hours":null,"travel_hours":null,"activity_hours":null}}`,
+		"emptyarr": `{"schedule":{"checkin_hours":[],"keepalive_hours":[],"travel_hours":[],"activity_hours":[]}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -360,7 +445,16 @@ func TestScheduleEmptyHoursFallsBackToDefault(t *testing.T) {
 			if len(c.Schedule.KeepaliveHours) != 1 || c.Schedule.KeepaliveHours[0] != 22 {
 				t.Errorf("keepalive_hours=%v want default [22]", c.Schedule.KeepaliveHours)
 			}
+			if len(c.Schedule.TravelHours) != 1 || c.Schedule.TravelHours[0] != 9 {
+				t.Errorf("travel_hours=%v want default [9]", c.Schedule.TravelHours)
+			}
+			if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
+				t.Errorf("activity_hours=%v want default [10]", c.Schedule.ActivityHours)
+			}
 			if !c.Schedule.CheckinEnabled || !c.Schedule.KeepaliveEnabled {
+				t.Errorf("empty hours must not imply disabled: %+v", c.Schedule)
+			}
+			if !c.Schedule.TravelEnabled || !c.Schedule.ActivityEnabled {
 				t.Errorf("empty hours must not imply disabled: %+v", c.Schedule)
 			}
 		})

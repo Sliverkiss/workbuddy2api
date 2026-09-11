@@ -41,7 +41,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
+| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭）；同时兜底用户/assistant 上下文中的指纹串 |
+| 💬 **系统提示词** | 网关自有系统提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的指纹误报；`passthrough` 模式遇内容拦截误报时自动降级重试 |
 
 ## 🗺️ 架构总览
 
@@ -154,6 +155,7 @@ curl -s http://localhost:7863/v1/chat/completions \
     "idle_timeout_seconds": 300
   },
   "features": { "sanitize_blacklist_fingerprints": true },
+  "prompt": { "mode": "custom", "file": "" },
   "upstash": { "url": "", "token": "" },
   "pool": {
     "max_in_flight": 3,
@@ -189,6 +191,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
+| `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
+| `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（~2KB）；路径非空但不可读 → 启动报错 |
 | `upstash.url` / `token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.breaker_threshold` | `3` | 连续失败触发熔断阈值 |
@@ -214,7 +218,30 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool）
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool） · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+
+## 💬 系统提示词
+
+客户端（Claude Code / Codex 等 CLI）会在 system prompt 注入固定模板句，上游内容审核按**逐字精确匹配**误杀合法流量（HTTP 400 + 审核文案）。网关支持用自有系统提示词从源头消灭 system 来源的指纹误报，由 `prompt.mode` 控制：
+
+| 模式 | 语义 |
+|---|---|
+| `custom`（默认） | 出站前用网关自有提示词**替换**客户端 system/developer 消息（删除全部 system/developer，头部插入单条 system）；user/assistant/tool 消息逐字不动 |
+| `passthrough` | 透传客户端原始 system，不做改写 |
+
+### 降级重试
+
+`passthrough` 模式请求被上游内容策略拦截（HTTP 400 + `blocked by security policy` / `unapproved channel` / `illegal api invocation` 文案）时，判定为 system 指纹误报：**同请求内**换 Degraded 中性提示词重试一次；第二次仍被拦（用户内容本身触发审核）→ 走既有错误路径返回客户端，并如实报给调用方。
+
+- 触发降级后持续到**次日 00:00 CST**（Asia/Shanghai）重置；期间 `passthrough` 请求直达中性提示词，不再先撞 400（已在降级期不续期，保持最早触发点的 00:00 重置）
+- 降级状态是**进程内存态**，重启清零
+- 内容问题非账号问题：`ErrContentBlocked` 不罚账号（无冷却/熔断/计错），由网关降级重试消化
+
+### 提示词内容
+
+内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 指向自定义提示词文件（自定义人格/人设）即整体替换内置默认；**留空 = 内置默认**。路径非空但不可读 → **启动报错**（fail fast，不回落到内置默认）。`custom` 模式下提示词随每次请求出站，token 成本由文件体积决定——内置仅 ~2KB，自定义文件需自行权衡（无独立计费保护）。
+
+> 与指纹脱敏的关系：本小节解决 **system/developer 来源**的指纹误报；用户/assistant 消息里的指纹串仍由 `features.sanitize_blacklist_fingerprints` 清洗——两层叠加、互不替代。
 
 ## 🧠 账号池与流量治理
 

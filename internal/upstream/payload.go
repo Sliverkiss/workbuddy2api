@@ -28,10 +28,11 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	obj["stream"] = true
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
-	normalizeReasoningEffort(obj, efforts)
-	// DeepSeek 思维链开关（见 thinking.go）：reasoning_effort 降级之后注入，
-	// 保证走降级链路的请求同样带上 thinking.type=enabled，思维链不丢。
+	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
+	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
+	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
 	injectThinking(obj)
+	normalizeReasoningEffort(obj, efforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)

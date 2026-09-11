@@ -57,6 +57,103 @@ func TestInjectThinkingDeepSeekEnabled(t *testing.T) {
 	}
 }
 
+// TestInjectThinkingDefaultEffort 打回修复主证据：无 effort 裸请求必须同时带
+// thinking.type=enabled 与默认档 reasoning_effort（否则上游 deepseek-v4-flash 不开思维链）。
+// 默认档 = 官方客户端兜底 "high"，并带上 supportedEfforts 时经降级管线落到合法档。
+func TestInjectThinkingDefaultEffort(t *testing.T) {
+	// 裸请求无任何思考参数 → 注入 enabled + reasoning_effort="high"。
+	out := PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`),
+		false, nil)
+	typ, present := getThinkingType(t, out)
+	if !present || typ != "enabled" {
+		t.Fatalf("thinking.type=%q present=%v want enabled (out=%s)", typ, present, out)
+	}
+	eff, ok := objFieldString(t, out, "reasoning_effort")
+	if !ok || eff != "high" {
+		t.Errorf("reasoning_effort=%q ok=%v want high（默认档）(out=%s)", eff, ok, out)
+	}
+
+	// 模型只支持 low/high → 默认 high 经降级管线后仍是 high（合法档）。
+	out = PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","messages":[]}`),
+		false, map[string][]string{"deepseek-v4-flash": {"low", "high"}})
+	eff, _ = objFieldString(t, out, "reasoning_effort")
+	if eff != "high" {
+		t.Errorf("supportedEfforts=[low high] 下默认档=%q want high (out=%s)", eff, out)
+	}
+
+	// 模型只支持 minimal/low → 默认 high 降级到 low（≤high 的最高支持档）。
+	out = PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","messages":[]}`),
+		false, map[string][]string{"deepseek-v4-flash": {"minimal", "low"}})
+	eff, _ = objFieldString(t, out, "reasoning_effort")
+	if eff != "low" {
+		t.Errorf("supportedEfforts=[minimal low] 下默认档降级=%q want low (out=%s)", eff, out)
+	}
+
+	// 显式 enabled + 缺 effort → 同样补默认档（官方 configure thinking 行为）。
+	out = PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","thinking":{"type":"enabled"},"messages":[]}`),
+		false, nil)
+	if eff, _ = objFieldString(t, out, "reasoning_effort"); eff != "high" {
+		t.Errorf("显式 enabled 缺 effort 应补默认档, got %q (out=%s)", eff, out)
+	}
+}
+
+// TestInjectThinkingEffortNotOverridden 已有显式 reasoning_effort（snake/camel）
+// 一律不覆盖、不降级、不删除；降级由 normalizeReasoningEffort 单独负责。
+func TestInjectThinkingEffortNotOverridden(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"snake effort 原样保留",
+			`{"model":"deepseek-v4-flash","thinking":{"type":"enabled"},"reasoning_effort":"medium","messages":[]}`},
+		{"camel effort 原样保留",
+			`{"model":"deepseek-v4-flash","reasoningEffort":"low","messages":[]}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+			typ, _ := getThinkingType(t, out)
+			if typ != "enabled" {
+				t.Fatalf("thinking.type=%q want enabled (out=%s)", typ, out)
+			}
+			// camel 分支：输入只有 camel，injectThinking 不得另加 snake 默认档。
+			if strings.Contains(c.body, "reasoningEffort") {
+				if _, ok := objFieldString(t, out, "reasoning_effort"); ok {
+					t.Errorf("已有 reasoningEffort 却新增 reasoning_effort 默认档 (out=%s)", out)
+				}
+			}
+		})
+	}
+	// 显式 effort + 无 thinking → 注入 enabled 但 effort 不覆盖。
+	out := PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","reasoning_effort":"medium","messages":[]}`),
+		false, nil)
+	if eff, _ := objFieldString(t, out, "reasoning_effort"); eff != "medium" {
+		t.Errorf("显式 effort 被改写 %q (out=%s)", eff, out)
+	}
+}
+
+// TestInjectThinkingDisabledNoDefaultEffort disabled 保持既有语义：
+// thinking.type=disabled 尊重关闭意图；reasoning_effort 删除；不得再补默认档。
+func TestInjectThinkingDisabledNoDefaultEffort(t *testing.T) {
+	out := PrepareBodyOptWithEfforts(
+		[]byte(`{"model":"deepseek-v4-flash","thinking":{"type":"disabled"},"reasoning_effort":"high","messages":[]}`),
+		false, nil)
+	typ, present := getThinkingType(t, out)
+	if !present || typ != "disabled" {
+		t.Fatalf("thinking.type=%q present=%v want disabled (out=%s)", typ, present, out)
+	}
+	for _, k := range []string{"reasoning_effort", "reasoningEffort"} {
+		if _, ok := objFieldString(t, out, k); ok {
+			t.Errorf("%s 应被删除且不得补默认档（disabled 时）(out=%s)", k, out)
+		}
+	}
+}
+
 // objFieldString 提取顶层字段 string 值。
 func objFieldString(t *testing.T, out []byte, key string) (string, bool) {
 	t.Helper()

@@ -57,7 +57,14 @@ func TestNextWakeKeepaliveOnly(t *testing.T) {
 
 // TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
 func TestNextWakeSameInstantFiresAll(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9, 22}, KeepaliveHours: []int{22}})
+	s := New(Config{
+		CheckinHours:   []int{9, 22},
+		TravelHours:    []int{},  // 禁用旅行时点干扰（仅测签到+保活同整点）
+		ActivityHours:  []int{},  // 禁用活跃时点干扰
+		KeepaliveHours: []int{22},
+		TravelDisabled: true,
+		ActivityDisabled: true,
+	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
@@ -66,7 +73,7 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		t.Errorf("kinds=%v want checkin+keepalive（同一时刻两任务）", kinds)
 	}
 
-	// 仅签到不重不漏：22 点过后下一次是次日 09:00，且只含签到。
+	// 22 点过后下一次是次日 09:00，且只含签到（旅行/活跃已禁用）。
 	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
@@ -109,10 +116,12 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	}
 }
 
-// TestNextWakeBothDisabledNothingScheduled 两类任务都显式禁用 → 无可唤醒时点。
+// TestNextWakeBothDisabledNothingScheduled 四类任务都显式禁用 → 无可唤醒时点。
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
 		CheckinDisabled:   true,
+		TravelDisabled:   true,
+		ActivityDisabled: true,
 		KeepaliveDisabled: true,
 		CheckinHours:      []int{9, 21},
 		KeepaliveHours:    []int{22},
@@ -123,8 +132,8 @@ func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	}
 }
 
-// TestRunAllDisabledNoSpinNoCalls 两类任务全禁用：Run 不空转（只等退出信号），
-// 且不能触发任何上游请求——签到禁用同时意味着搭便车的猫猫旅行也停。
+// TestRunAllDisabledNoSpinNoCalls 四类任务全禁用：Run 不空转（只等退出信号），
+// 且不能触发任何上游请求。
 func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +153,8 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 		Pool:              p,
 		Upstream:          up,
 		CheckinDisabled:   true,
+		TravelDisabled:   true,
+		ActivityDisabled: true,
 		KeepaliveDisabled: true,
 	})
 
@@ -154,7 +165,7 @@ func TestRunAllDisabledNoSpinNoCalls(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if calls.Load() != 0 {
-		t.Errorf("upstream calls=%d want 0（签到禁用 → 旅行也不跑）", calls.Load())
+		t.Errorf("upstream calls=%d want 0（四类全禁用）", calls.Load())
 	}
 	if elapsed < 200*time.Millisecond {
 		t.Errorf("Run returned after %v, before ctx done（不应提前返回）", elapsed)

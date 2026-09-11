@@ -110,8 +110,9 @@ func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Sc
 	return New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}}), p
 }
 
-// TestRunCheckinNowTriggersTravel 签到收尾顺带跑一趟旅行（无猫 → 同意协议 + 领养）。
-func TestRunCheckinNowTriggersTravel(t *testing.T) {
+// TestRunCheckinNowNoLongerTriggersTravel 签到收尾不再跑旅行（旅行已剥离为独立排程）。
+// 旅行由独立时点（travel_hours）触发，与签到解耦。
+func TestRunCheckinNowNoLongerTriggersTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
 	srv := billingAndGrowthServer(stub)
@@ -120,8 +121,24 @@ func TestRunCheckinNowTriggersTravel(t *testing.T) {
 	s, _ := newTravelScheduler(t, srv, "u1")
 	s.RunCheckinNow()
 
+	// 签到不再顺带跑旅行：buddy/info 不应被调用。
+	if n := stub.infoCalls.Load(); n != 0 {
+		t.Errorf("buddy/info calls=%d want 0（旅行已从签到剥离）", n)
+	}
+}
+
+// TestRunTravelNowAdoptsOnNoBuddy 旅行独立排程：无猫 → 同意协议 + 领养。
+func TestRunTravelNowAdoptsOnNoBuddy(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+
 	if n := stub.infoCalls.Load(); n != 1 {
-		t.Errorf("buddy/info calls=%d want 1（签到收尾应顺带跑一趟旅行）", n)
+		t.Errorf("buddy/info calls=%d want 1", n)
 	}
 	if n := stub.firstCalls.Load(); n != 1 {
 		t.Errorf("buddy/first calls=%d want 1（无猫应尝试领养）", n)
@@ -131,26 +148,25 @@ func TestRunCheckinNowTriggersTravel(t *testing.T) {
 	}
 }
 
-// TestRunCheckinTravelCoversAccountsJustReenabled 签到解冻的账号当轮即参与旅行。
-func TestRunCheckinTravelCoversAccountsJustReenabled(t *testing.T) {
+// TestRunTravelCoversIdleAccount 旅行独立排程覆盖空闲账号并派出。
+func TestRunTravelCoversIdleAccount(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`,
 		state: `{"state":"idle","daily_limit_reached":false}`}
-	srv := billingAndGrowthServer(stub)
+	srv := stub.server()
 	defer srv.Close()
 
-	s, p := newTravelScheduler(t, srv, "u1")
-	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
+	s, _ := newTravelScheduler(t, srv, "u1")
 
-	s.RunCheckinNow()
+	s.RunTravelNow()
 
-	// 签到查到余额 500 解冻 → 收尾的旅行覆盖到该账号并派出。
+	// 有猫 + idle + 未达上限 → 派出。
 	if n := stub.departCalls.Load(); n != 1 {
-		t.Errorf("depart calls=%d want 1（刚解冻账号应被本轮旅行覆盖）", n)
+		t.Errorf("depart calls=%d want 1", n)
 	}
 }
 
-// TestRunKeepaliveDoesNotTriggerTravel 22 点保活不触发旅行：旅行只搭签到便车。
+// TestRunKeepaliveDoesNotTriggerTravel 22 点保活不触发旅行：旅行独立排程。
 func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}

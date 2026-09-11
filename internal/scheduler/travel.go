@@ -1,4 +1,4 @@
-// travel.go 猫猫旅行巡检状态机：随签到时点（09/21 点）对池内每个可用账号单趟推进一次。
+// travel.go 猫猫旅行巡检状态机：随旅行时点（travel_hours，默认 09 点）对池内每个可用账号单趟推进一次。
 // 无猫 → 同意协议 + 领养；有猫 → 按 travel/status 分派 派出 / 领奖 / 跳过。
 package scheduler
 
@@ -22,6 +22,9 @@ const (
 
 // travelAccountDelay 账号间限速：全量账号约 40s，避免上游风控。测试可置 0。
 var travelAccountDelay = 800 * time.Millisecond
+
+// activityAccountDelay 活跃上报账号间限速：与旅行同口径，避免上游风控。测试可置 0。
+var activityAccountDelay = 800 * time.Millisecond
 
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
 // 不依赖容器 tzdata。

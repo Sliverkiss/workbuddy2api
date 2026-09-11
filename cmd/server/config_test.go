@@ -491,3 +491,100 @@ func TestBadSessionTTL(t *testing.T) {
 		t.Fatal("want error for bad session_sticky.ttl")
 	}
 }
+
+// TestPromptDefaultCustom 默认 prompt.mode=custom 且 PromptText 为内置默认（非空）。
+func TestPromptDefaultCustom(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.Mode != "custom" {
+		t.Errorf("prompt.mode=%q want custom", c.Prompt.Mode)
+	}
+	if c.PromptText == "" {
+		t.Error("PromptText should be non-empty (built-in default)")
+	}
+}
+
+// TestPromptExplicitPassthrough passthrough 模式不加载文本（透传客户端原始 system）。
+func TestPromptExplicitPassthrough(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"passthrough"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
+	}
+	if c.PromptText != "" {
+		t.Errorf("passthrough should not load PromptText, got len=%d", len(c.PromptText))
+	}
+}
+
+// TestPromptInvalidMode 非法 mode 启动报错。
+func TestPromptInvalidMode(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"bogus"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for invalid prompt.mode")
+	}
+}
+
+// TestPromptFileMissing 文件路径非空但不存在 → 启动报错（fail fast）。
+func TestPromptFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"custom","file":"/nonexistent/p.md"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for missing prompt file")
+	}
+}
+
+// TestPromptFileOverride 自定义 file 覆盖内置默认。
+func TestPromptFileOverride(t *testing.T) {
+	dir := t.TempDir()
+	pf := filepath.Join(dir, "my.md")
+	want := "我的自定义人格入口"
+	os.WriteFile(pf, []byte(want), 0o600)
+	cf := filepath.Join(dir, "c.json")
+	os.WriteFile(cf, []byte(`{"prompt":{"mode":"custom","file":"`+pf+`"}}`), 0o600)
+	c, err := Load(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PromptText != want {
+		t.Errorf("PromptText=%q want %q", c.PromptText, want)
+	}
+}
+
+// TestPromptEnvOverride env 覆盖 prompt.mode 与 prompt.file。
+func TestPromptEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_PROMPT_MODE", "passthrough")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
+	}
+}
+
+// TestPromptLegacyConfigNoImpact 旧 config（无 prompt 段）零影响：mode 仍 custom。
+func TestPromptLegacyConfigNoImpact(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k"}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.Mode != "custom" {
+		t.Errorf("legacy config should default to custom, got %q", c.Prompt.Mode)
+	}
+	if c.Listen != ":9999" {
+		t.Errorf("listen=%q", c.Listen)
+	}
+}

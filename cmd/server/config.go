@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/prompt"
 )
 
 // Config 顶层配置。
@@ -61,6 +63,18 @@ type Config struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 	} `json:"features"`
+
+	Prompt struct {
+		// Mode custom（默认）= 网关用自有系统提示词替换客户端 system/developer；
+		// passthrough = 透传客户端原始 system（降级重试仍会切到 Degraded）。
+		Mode string `json:"mode"` // "custom" / "passthrough"
+		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
+		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
+		File string `json:"file"`
+	} `json:"prompt"`
+
+	// PromptText 解析后的系统提示词文本（custom 模式使用）。
+	PromptText string `json:"-"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -116,6 +130,7 @@ func Default() *Config {
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
 	c.Features.SanitizeBlacklistFingerprints = true
+	c.Prompt.Mode = "custom" // 缺省 custom：网关自有提示词从源头消灭 system 指纹误报
 	c.Pool.MaxInFlight = 3
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
@@ -186,6 +201,12 @@ func applyEnv(c *Config) {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
+	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
+		c.Prompt.Mode = v
+	}
+	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
+		c.Prompt.File = v
+	}
 }
 
 func (c *Config) normalize() error {
@@ -251,6 +272,30 @@ func (c *Config) normalize() error {
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
+	}
+	return c.normalizePrompt()
+}
+
+// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom 模式）。
+//
+// mode 非法（非 custom/passthrough）启动报错，避免静默回落到某一分支；
+// custom 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认。
+// passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
+func (c *Config) normalizePrompt() error {
+	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
+	case "", "custom":
+		c.Prompt.Mode = "custom"
+	case "passthrough":
+		c.Prompt.Mode = "passthrough"
+	default:
+		return fmt.Errorf("prompt.mode: %q 不是合法值（custom / passthrough）", c.Prompt.Mode)
+	}
+	if c.Prompt.Mode == "custom" {
+		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
+		if err != nil {
+			return err
+		}
+		c.PromptText = text
 	}
 	return nil
 }

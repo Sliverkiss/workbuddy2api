@@ -153,7 +153,8 @@ curl -s http://localhost:7863/v1/chat/completions \
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 300,
+    "user_agent": ""
   },
   "features": { "sanitize_blacklist_fingerprints": true },
   "prompt": { "mode": "custom", "file": "" },
@@ -192,6 +193,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。全部出站请求生效（chat/refresh/checkin/balance/report/travel/模型列表）。官网「使用端」列按出站 UA 服务端归因：官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，想让它显示 WorkBuddy 可配 `"WorkBuddy/2.x.x"`。默认保持现状（指纹净化考虑，可配而非改死） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（~2KB）；路径非空但不可读 → 启动报错 |
@@ -220,7 +222,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_SANITIZE_FINGERPRINTS`（bool） · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`（duration） · `WB2A_SOFT_RATE_MAX`（duration） · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT`（非空覆盖出站 UA，同 `upstream.user_agent`） · `WB2A_SANITIZE_FINGERPRINTS`（bool） · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
 ## 💬 系统提示词
 

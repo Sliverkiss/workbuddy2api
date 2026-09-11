@@ -72,10 +72,10 @@ func objFieldString(t *testing.T, out []byte, key string) (string, bool) {
 // thinking.type 非空（enabled/disabled）都不得被覆盖。
 func TestInjectThinkingDeepSeekExplicitControl(t *testing.T) {
 	cases := []struct {
-		name     string
-		body     string
-		wantTyp  string
-		wantEff  string // 期望 reasoning_effort 值；"" 且 wantEffAbsent=true 表示应删除
+		name    string
+		body    string
+		wantTyp string
+		wantEff string // 期望 reasoning_effort 值；"" 且 wantEffAbsent=true 表示应删除
 	}{
 		{"已有 enabled 不动",
 			`{"model":"deepseek-v4-flash","thinking":{"type":"enabled"},"messages":[]}`,

@@ -645,3 +645,32 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 		t.Errorf("listen=%q", c.Listen)
 	}
 }
+
+// TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
+// 缺省空串保持现状（headers 层回落到 clientUA）。
+func TestUpstreamUserAgentConfig(t *testing.T) {
+	// JSON 配置
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"user_agent":"WorkBuddy/1.2.3"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.UserAgent != "WorkBuddy/1.2.3" {
+		t.Errorf("user_agent=%q want WorkBuddy/1.2.3", c.Upstream.UserAgent)
+	}
+	// 缺省为空
+	if c2, err := Load(""); err != nil || c2.Upstream.UserAgent != "" {
+		t.Errorf("default user_agent=%q want empty (err=%v)", c2.Upstream.UserAgent, err)
+	}
+	// env 覆盖
+	t.Setenv("WB2A_USER_AGENT", "EnvAgent/9")
+	c3, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Upstream.UserAgent != "EnvAgent/9" {
+		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
+	}
+}

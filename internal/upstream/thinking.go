@@ -10,6 +10,7 @@
 //   - 请求体已有 thinking.type 非空 → 客户端显式控制，绝不覆盖（enabled/disabled 都尊重）；
 //     disabled 时照抄客户端行为一并删除 reasoning_effort（snake/camel 双字段）。
 //   - 无 thinking 字段，或 thinking 对象 type 为空/缺失，或有 reasoning_effort → 注入 {type:"enabled"}。
+//
 // 非 deepseek 模型（glm/kimi/qwen 等）→ 零改动。
 package upstream
 
@@ -31,10 +32,11 @@ func isDeepSeekModel(model string) bool {
 // 规则（对齐官方客户端逻辑）：
 //   - 会话内任一 assistant 消息带非空 reasoning（string）或已有 reasoning_content 字段
 //     → 所有 assistant 消息确保有 reasoning_content（string）：
-//       * reasoning 非空且无 reasoning_content → 复制 reasoning 值
-//       * 已有 reasoning_content → 原样保留（不覆盖）
-//       * 两者皆无 → 补空串 ""
+//   - reasoning 非空且无 reasoning_content → 复制 reasoning 值
+//   - 已有 reasoning_content → 原样保留（不覆盖）
+//   - 两者皆无 → 补空串 ""
 //   - 任何 assistant 均无 reasoning 痕迹 → 零改动（不白白加字段）。
+//
 // 仅 deepseek 模型生效（thinkingFormat:deepseek + requiresReasoningContent）。
 func backfillReasoningContent(obj map[string]any) {
 	model, _ := obj["model"].(string)

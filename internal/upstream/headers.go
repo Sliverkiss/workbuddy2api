@@ -17,21 +17,30 @@ func originRefererFor(a *auth.Auth) string {
 	return originRefererCN
 }
 
+// userAgent 返回当前出站 UA：Client.UserAgent 非空则覆盖（全部出站请求生效），
+// 空 = 保持现状 clientUA。指纹净化考虑：默认值不变，仅当用户显式配置才改写。
+func (c *Client) userAgent() string {
+	if c != nil && c.UserAgent != "" {
+		return c.UserAgent
+	}
+	return clientUA
+}
+
 // CommonHeaders 设置所有 API 共享的请求头。
-func CommonHeaders(req *http.Request, a *auth.Auth) {
+func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", c.userAgent())
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
-func ChatHeaders(req *http.Request, a *auth.Auth) {
-	CommonHeaders(req, a)
+func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
+	c.CommonHeaders(req, a)
 	if a.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	} else {
@@ -57,10 +66,15 @@ func ChatHeaders(req *http.Request, a *auth.Auth) {
 }
 
 // BillingHeaders billing 接口请求头。
-func BillingHeaders(req *http.Request, a *auth.Auth) {
+// UA 语义：默认**不设置**（保持现状，Go 客户端自带默认 UA）；仅当显式配置
+// c.UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
+func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	if c != nil && c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
@@ -74,8 +88,8 @@ func BillingHeaders(req *http.Request, a *auth.Auth) {
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
-func RefreshHeaders(req *http.Request, a *auth.Auth) {
-	CommonHeaders(req, a)
+func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
+	c.CommonHeaders(req, a)
 	req.Header.Set("X-Refresh-Token", a.RefreshToken)
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)

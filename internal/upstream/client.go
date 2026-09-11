@@ -256,6 +256,14 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
+	// UserAgent 出站 User-Agent 覆盖（空 = 现状 clientUA）。
+	// 全部出站请求生效：chat / refresh / checkin / balance(含 report/travel) / FetchModels。
+	// issue #42 深挖：官网「使用端」列基于出站请求的 UA/X-Product 服务端归因，
+	// 官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`（product.json applicationName=WorkBuddy，
+	// UserAgentHttpInterceptor 把 productName/platform 前缀拼进 UA）。默认保持现状
+	// （指纹净化考虑），仅当用户显式配置才改写。
+	UserAgent string
+
 	ChatBaseCN    string
 	BillingBaseCN string
 }
@@ -352,7 +360,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	RefreshHeaders(req, a)
+	c.RefreshHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
@@ -389,7 +397,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	c.ChatHeaders(req, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
@@ -435,7 +443,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", c.userAgent())
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -546,7 +554,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return 0, err
@@ -594,7 +602,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }

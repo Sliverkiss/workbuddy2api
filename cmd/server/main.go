@@ -92,6 +92,8 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 出站 UA 覆盖（issue #42）：非空才改写，空 = 现状 clientUA（指纹净化考虑）。
+	up.UserAgent = cfg.Upstream.UserAgent
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:              p,

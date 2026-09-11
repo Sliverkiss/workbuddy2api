@@ -65,6 +65,12 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+		// UserAgent 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。
+		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
+		// issue #42 深挖：官网「使用端」列基于出站请求 UA 的服务端归因，官方 WorkBuddy
+		// 桌面 UA 为 `WorkBuddy/<version>`。指纹净化考虑：默认值保持现状（可配而非改死），
+		// 仅当用户显式配置才改写。
+		UserAgent string `json:"user_agent"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -209,6 +215,9 @@ func applyEnv(c *Config) {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
+	}
+	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
+		c.Upstream.UserAgent = v
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

@@ -111,7 +111,7 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
 	if err != nil {
 		return err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }

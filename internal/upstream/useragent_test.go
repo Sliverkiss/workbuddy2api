@@ -45,7 +45,7 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 		{
 			name: "billing_report",
 			call: func(c *Client) error {
-				return c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid")
+				return c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 			},
 			wantUA: "",
 		},

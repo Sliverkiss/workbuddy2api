@@ -10,7 +10,8 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestReportChatActivitySendsArrayWithUserID 断言出站 body 是数组、含 userId、eventCode 正确。
+// TestReportChatActivitySendsArrayWithUserID 断言出站 body 是数组、含 userId、eventCode 正确，
+// 且 requestId 与 conversationId 可独立（多轮同会话各条 requestId 不同）。
 func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	var got []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +32,7 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
-	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, "wb2api-123"); err != nil {
+	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, "wb2api-123", "req-7"); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	if len(got) != 1 {
@@ -46,6 +47,9 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	}
 	if ev["conversationId"] != "wb2api-123" {
 		t.Errorf("conversationId=%v want wb2api-123", ev["conversationId"])
+	}
+	if ev["requestId"] != "req-7" {
+		t.Errorf("requestId=%v want req-7（多轮同会话 requestId 独立）", ev["requestId"])
 	}
 	if ev["mode"] != "craft" {
 		t.Errorf("mode=%v want craft", ev["mode"])
@@ -62,7 +66,7 @@ func TestReportChatActivityServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
-	err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid")
+	err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 	if err == nil {
 		t.Fatal("want error on 500")
 	}

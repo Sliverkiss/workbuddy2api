@@ -83,8 +83,12 @@ type chatRequestEvent struct {
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
 // conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
+// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
 // 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
-func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
+func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
+	if requestID == "" {
+		requestID = conversationID
+	}
 	now := time.Now().UnixMilli()
 	ev := chatRequestEvent{
 		EventCode:             "chat_request_send",
@@ -92,7 +96,7 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID string) error {
 		ReportDelay:           0,
 		Mode:                  "craft",
 		ConversationID:        conversationID,
-		RequestID:             conversationID,
+		RequestID:             requestID,
 		InputLength:           12,
 		RequestModelID:        "deepseek-v4-flash",
 		RequestModelName:      "DeepSeek V4 Flash",

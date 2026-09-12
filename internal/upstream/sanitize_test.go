@@ -107,6 +107,16 @@ func TestBillingHeaderStrippedValueIrrelevant(t *testing.T) {
 	}
 }
 
+// 附加验证：正常对话里出现 github.com/anthropics/ 链接（但不是反馈句整句）
+// 时，预检特征命中（进入净化），但改写层只动精确匹配的整句——普通链接文本
+// 不该被改写。同理，既不含 11128 也不含反馈整句的文本原样返回。
+func TestNormalAnthropicLinkNotRewritten(t *testing.T) {
+	in := "see https://github.com/anthropics/anthropic-cookbook for examples"
+	if out := sanitizeText(in); out != in {
+		t.Errorf("normal anthropic link should be untouched: %q -> %q", in, out)
+	}
+}
+
 // Codex instructions 首段：命中预告且整句改写，逐字指纹被破坏、语义保留。
 func TestCodexInstructionsRewritten(t *testing.T) {
 	out := sanitizeText(codexInstructions)

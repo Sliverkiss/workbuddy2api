@@ -387,3 +387,24 @@ func TestChatHTTPNilFallsBackToHTTP(t *testing.T) {
 		t.Error("chatHTTP() should fall back to HTTP when ChatHTTP is nil")
 	}
 }
+
+func TestIsAlreadyCheckin(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"业务码已签到", &Error{Kind: ErrClient, Status: 400, Msg: `code=10001 msg=今天已签到`}, true},
+		{"英文 already", &Error{Kind: ErrClient, Status: 400, Msg: "already checked in today"}, true},
+		{"余额不足", &Error{Kind: ErrHardCredit, Status: 402, Msg: "余额不足"}, false},
+		{"服务端错误", &Error{Kind: ErrServer, Status: 500, Msg: "boom"}, false},
+		// 网络层/解析层错误没有分类，绝不能当成"已签到"，否则补偿签到会静默漏签。
+		{"网络错误", errors.New("dial tcp: connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsAlreadyCheckin(c.err); got != c.want {
+			t.Errorf("%s: got=%v want=%v", c.name, got, c.want)
+		}
+	}
+}

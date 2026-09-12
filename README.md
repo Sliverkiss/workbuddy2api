@@ -117,6 +117,10 @@ curl -s http://localhost:7863/v1/models \
 curl -s http://localhost:7863/status \
   -H "Authorization: Bearer your-api-key"
 
+# 手动签到（错过整点签到时补签；返回逐账号结果）
+curl -s -X POST http://localhost:7863/checkin \
+  -H "Authorization: Bearer your-api-key"
+
 # 流式聊天
 curl -sN http://localhost:7863/v1/chat/completions \
   -H "Authorization: Bearer your-api-key" \
@@ -141,7 +145,7 @@ curl -s http://localhost:7863/v1/chat/completions \
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "cooldown": { "soft_rate": "60s" },
-  "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22] },
+  "schedule": { "checkin_hours": [9, 21], "keepalive_hours": [22], "checkin_on_start": true },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
@@ -172,6 +176,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `cooldown.soft_rate` | `60s` | 429/404 软冷却时长 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询 |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
+| `schedule.checkin_on_start` | `true` | 服务/容器启动时补签一次（停机错过整点签到的补偿） |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
@@ -258,10 +263,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 定时任务
 
-| 任务 | 时刻（本地时区） | 行为 |
+| 任务 | 触发 | 行为 |
 |---|---|---|
 | 签到 | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
 | 保活 | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
+| 启动补签 | 服务/容器启动时（`checkin_on_start`） | 停机错过整点签到时立即补一次；重复签到由上游判为已签到，安全幂等 |
+
+主机/容器整夜关机导致错过 `checkin_hours` 时，重启后由启动补签自动补齐；
+也可随时用 `POST /checkin` 手动触发（见下方 API 端点）。签到前会按需刷新 token，
+所以长时间停机后过期的 access token 不会让补签空跑。
 
 容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
 
@@ -272,9 +282,25 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
+| `POST /checkin` | Bearer（`api_key` 非空时） | 手动触发全量签到（补签入口）；返回逐账号结果；已有签到在跑返回 409 |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503 |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+
+`POST /checkin` 响应示例（`account.status`：`ok` 签到成功 / `already` 今天已签到 / `fail` 失败 / `skipped` 禁用或无凭证）：
+
+```json
+{
+  "total": 2, "ok": 1, "already": 1, "failed": 0, "skipped": 0,
+  "accounts": [
+    { "uid": "u1", "nickname": "nick", "status": "ok", "credits": 1200 },
+    { "uid": "u2", "status": "already", "credits": 800 }
+  ]
+}
+```
+
+> `already` 是幂等成功（当天已完成签到），**不带** `detail`；仅 `fail`/`skipped` 会带原因。
+> 终端里想直接看表格结果：`./checkin.sh`。
 
 ### 流式行为细节
 
@@ -345,7 +371,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建
 - 构建命令：`CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server`（Dockerfile 多阶段：`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）
-- 登录/签到/积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`（缺失时自动编译对应 `cmd/*`）
+- 登录/签到/积分工具：`./login.sh` / `./signin.sh` / `./checkin.sh` / `./credit.sh`（缺失时自动编译对应 `cmd/*`）
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
@@ -361,7 +387,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 脚本 | 用途 |
 |---|---|
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
-| `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
+| `./signin.sh [auths_dir]` | 批量签到（离线工具，直连上游，不经过网关；过期先刷新） |
+| `./checkin.sh` / `-v` / `-json` | 手动触发网关签到并排成表格（`-v` 附问题明细；`-json` 原始输出） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
 
 ## 🛠️ 开发

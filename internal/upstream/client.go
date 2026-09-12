@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -69,6 +70,9 @@ var hardMarkers = []string{
 }
 
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
+
+// alreadyCheckinMarkers "今天已签到"关键词（上游对重复签到返回 code!=0，实测 code=10001 "今天已签到"）。
+var alreadyCheckinMarkers = []string{"已签到", "already"}
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 func Classify(status int, body string) ErrKind {
@@ -471,6 +475,22 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	BillingHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
+}
+
+// IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。
+// 只认带分类的 *Error（业务 code 或 HTTP 错误）：网络层/解析层错误不得当作幂等成功，
+// 否则停机补签遇到抖动会误记为 already，账号当天实际未签到却被判定正常。
+func IsAlreadyCheckin(err error) bool {
+	var ue *Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	for _, m := range alreadyCheckinMarkers {
+		if strings.Contains(ue.Msg, m) || strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, n int) string {

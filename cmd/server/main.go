@@ -107,11 +107,21 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
+		Checkin:      sch.CheckinAll,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 启动补签：主机/容器停机错过整点签到（checkin_hours）时，起来即补一次。
+	// 幂等：当天已签到由上游拒绝并按 already 记账；后台执行不阻塞监听。
+	if cfg.Schedule.CheckinOnStart {
+		go func() {
+			if _, err := sch.CheckinAll(); err != nil {
+				log.Printf("startup checkin skipped: %v", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

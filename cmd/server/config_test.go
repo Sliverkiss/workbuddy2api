@@ -219,3 +219,26 @@ func TestBadSessionTTL(t *testing.T) {
 		t.Fatal("want error for bad session_sticky.ttl")
 	}
 }
+
+func TestCheckinOnStartDefaultTrue(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !c.Schedule.CheckinOnStart {
+		t.Error("checkin_on_start 默认必须为 true（停机错过签到要能补偿）")
+	}
+}
+
+func TestCheckinOnStartCanBeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_on_start":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Schedule.CheckinOnStart {
+		t.Error("显式 false 应关闭启动补签")
+	}
+}

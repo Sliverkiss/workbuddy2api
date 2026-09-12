@@ -43,10 +43,14 @@ func TestNextFireMergesSchedules(t *testing.T) {
 }
 
 // fakeUpstream 同时模拟 billing 与 refresh。
+// already=true 时 daily-checkin 返回业务错误（code=10001 "今天已签到"），
+// 用于验证签到入口把"已签到"归类为 already 而非 fail。
 type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
 	resourceRemain int64
+	already        bool // true 时 daily-checkin 返回业务错误（今天已签到）
+	refreshFails   bool // true 时 refresh 返回 500，模拟刷新接口抖动
 }
 
 func (f *fakeUpstream) server() *httptest.Server {
@@ -54,12 +58,21 @@ func (f *fakeUpstream) server() *httptest.Server {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
 			f.checkinCalls.Add(1)
+			if f.already {
+				w.Write([]byte(`{"code":10001,"msg":"今天已签到","data":{}}`))
+				return
+			}
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":` +
 				jsonI64(f.resourceRemain) + `,"CycleCapacityUsed":0}]}}}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			f.refreshCalls.Add(1)
+			if f.refreshFails {
+				w.WriteHeader(500)
+				w.Write([]byte(`boom`))
+				return
+			}
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
 		default:
 			http.Error(w, "not found", 404)

@@ -13,6 +13,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
@@ -31,6 +32,8 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// Checkin 手动签到入口（main 注入 scheduler.CheckinAll）；nil = 接口不可用。
+	Checkin func() ([]scheduler.CheckinOutcome, error)
 }
 
 // Handler 主路由。
@@ -54,6 +57,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("POST /checkin", h.withAuth(h.checkin))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }
@@ -73,6 +77,46 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// checkin 手动触发全量签到（定时任务错过整点时的补签入口）。
+// 复用调度器同一套逻辑：按需刷新 token → 签到 → 查余额 → 解冻冷却账号。
+// 已有签到在跑时返回 409（幂等重试即可：重复签到由上游判定 already）。
+func (h *Handler) checkin(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Checkin == nil {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "checkin_unavailable", "checkin not configured")
+		return
+	}
+	outcomes, err := h.cfg.Checkin()
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, scheduler.ErrBusy) {
+			status = http.StatusConflict
+		}
+		writeOpenAIError(w, status, "checkin_failed", err.Error())
+		return
+	}
+	var okN, alreadyN, failN, skipN int
+	for _, o := range outcomes {
+		switch o.Status {
+		case scheduler.CheckinOK:
+			okN++
+		case scheduler.CheckinAlready:
+			alreadyN++
+		case scheduler.CheckinFail:
+			failN++
+		default:
+			skipN++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":    len(outcomes),
+		"ok":       okN,
+		"already":  alreadyN,
+		"failed":   failN,
+		"skipped":  skipN,
+		"accounts": outcomes,
+	})
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {

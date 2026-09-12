@@ -27,6 +27,8 @@ type Config struct {
 	Schedule struct {
 		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
+		// CheckinOnStart 启动时补一次签到（主机/容器停机错过整点签到时的补偿），默认 true。
+		CheckinOnStart bool `json:"checkin_on_start"`
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -82,6 +84,9 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
+	// 布尔零值为 false，故默认值必须在 Default 里显式置 true；
+	// config 文件写 "checkin_on_start": false 才关闭（未出现的键保持 true）。
+	c.Schedule.CheckinOnStart = true
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0

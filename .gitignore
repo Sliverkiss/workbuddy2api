@@ -20,6 +20,11 @@ config.json
 *.tmp
 __pycache__/
 
+# Web 管理台前端产物(构建期生成,go:embed 仅需目录存在)
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+web/node_modules/
+
 # Backups (contains auth tokens)
 backups/
 

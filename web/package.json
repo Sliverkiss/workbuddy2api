@@ -1,0 +1,26 @@
+{
+  "name": "workbuddy-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "WorkBuddy 账号池网页管理面板(配套 workbuddy2api,零入侵)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.mjs",
+    "test:server": "node server/selftest.mjs"
+  },
+  "dependencies": {
+    "@lucide/vue": "^1.45.0",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.42",
+    "vue-router": "^5.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.0"
+  }
+}

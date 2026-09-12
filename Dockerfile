@@ -1,9 +1,20 @@
 # syntax=docker/dockerfile:1
+# 前端构建阶段：产出 internal/web/dist(go:embed 编译期内嵌进 wb2api)。
+FROM node:22-alpine AS webbuild
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
+# 前端产物必须落在 internal/web/dist(go:embed 指令编译期读取该目录);
+# vite outDir 为 ../internal/web/dist,在 webbuild 阶段即 /internal/web/dist。
+COPY --from=webbuild /internal/web/dist ./internal/web/dist
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \

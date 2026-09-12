@@ -115,11 +115,32 @@ func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 	log.Printf("travel %s: claim ok record=%d reward=%d", a.UID, ts.RecordID, reward)
 }
 
-// travelAdopt 无猫时领养：先同意协议（幂等）再 buddy/first。
-// conversation 门槛未达标（HTTP 400 first_buddy task not completed yet）属预期行为，
-// 记一次当日已试后静默跳过，不再重试。
+// travelAdopt 旅行巡检时领养：受 adoptTriedToday 当日防抖约束。
 func (s *Scheduler) travelAdopt(a *auth.Auth) {
-	if s.adoptTriedToday(a.UID) {
+	s.adoptBuddy(a, false)
+}
+
+// travelAdoptForce 活跃上报补满对话量后领养：豁免 adoptTriedToday 当日防抖。
+// 背景：旅行排程 09 点已领养且因对话量未达 skip，10 点活跃上报 5 连发把
+// 对话量补满——此时是「门槛刚达成」的新状态，不算对上游重试轰炸，放行重试。
+// 有猫账号 BuddyInfo 非空时直接跳过（不重复领养）。
+func (s *Scheduler) travelAdoptForce(a *auth.Auth) {
+	buddy, err := s.cfg.Upstream.BuddyInfo(a)
+	if err != nil {
+		log.Printf("activity %s: buddy-info: %v", a.UID, err)
+		return
+	}
+	if buddy != nil {
+		return // 已有猫，无需领养
+	}
+	s.adoptBuddy(a, true) // force=true 豁免当日防抖
+}
+
+// adoptBuddy 无猫时领养：先同意协议（幂等）再 buddy/first。
+// conversation 门槛未达标（HTTP 400 first_buddy task not completed yet）属预期行为，
+// 记一次当日已试后静默跳过，不再重试。force=true 时豁免当日防抖（活跃上报补满对话量后重试）。
+func (s *Scheduler) adoptBuddy(a *auth.Auth, force bool) {
+	if !force && s.adoptTriedToday(a.UID) {
 		return
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {

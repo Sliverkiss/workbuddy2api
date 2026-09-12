@@ -78,6 +78,28 @@ func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	}
 }
 
+// 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
+// 直接 continue，整条消息连 tool_calls 一起被跳过 → arguments 里的被拦字符串原样漏出。
+func TestToolCallArgumentsSanitized(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "user", "content": "run"},
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "c1", "type": "function", "function": map[string]any{
+				"name":      "Bash",
+				"arguments": `{"command":"echo 11128"}`,
+			}},
+		}},
+	}
+	if !sanitizeMessages(msgs) {
+		t.Fatal("sanitizeMessages 未报告任何改动，tool_calls 被跳过")
+	}
+	fn := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	got := fn["arguments"].(string)
+	if strings.Contains(got, "11128") {
+		t.Errorf("tool_call arguments 未被净化: %q", got)
+	}
+}
+
 func TestBillingHeaderStrippedValueIrrelevant(t *testing.T) {
 	out := sanitizeText(ccHeader)
 	if strings.Contains(out, "x-anthropic-billing-header") {

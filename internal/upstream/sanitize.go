@@ -128,7 +128,40 @@ func sanitizeContent(v any) (any, bool) {
 	return v, false
 }
 
-// sanitizeMessages 净化 messages 中的 content；任一命中返回 true。
+// sanitizeToolCalls 净化 assistant.tool_calls[].function.arguments。
+//
+// arguments 是**字符串化的 JSON**（不是对象），因此按文本走 sanitizeText 即可。
+// 这块长期是盲区：工具调用消息的 content 通常是 null，而旧版 sanitizeMessages
+// 在 content 缺失时直接 continue，整条消息连 tool_calls 一起被跳过——
+// 于是历史里任何写进工具参数的被拦字符串（文件名、命令、写入内容）都会原样漏出。
+func sanitizeToolCalls(v any) bool {
+	callList, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, c := range callList {
+		call, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := call["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		args, ok := fn["arguments"].(string)
+		if !ok {
+			continue
+		}
+		if s := sanitizeText(args); s != args {
+			fn["arguments"] = s
+			changed = true
+		}
+	}
+	return changed
+}
+
+// sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false
 	for _, msg := range messages {
@@ -136,13 +169,18 @@ func sanitizeMessages(messages []any) bool {
 		if !ok {
 			continue
 		}
-		c, ok := m["content"]
-		if !ok {
-			continue
+		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
+		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
+		if c, ok := m["content"]; ok {
+			if nc, ch := sanitizeContent(c); ch {
+				m["content"] = nc
+				changed = true
+			}
 		}
-		if nc, ch := sanitizeContent(c); ch {
-			m["content"] = nc
-			changed = true
+		if tc, ok := m["tool_calls"]; ok {
+			if sanitizeToolCalls(tc) {
+				changed = true
+			}
 		}
 	}
 	return changed

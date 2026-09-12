@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # 前端构建阶段：产出 internal/web/dist(go:embed 编译期内嵌进 wb2api)。
 FROM node:22-alpine AS webbuild
 WORKDIR /web

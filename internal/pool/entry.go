@@ -81,6 +81,27 @@ type entry struct {
 	sessionDeadFails int
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
+
+	// modelCost 实测扣费账本：model → 观测（运行态，不持久化）。
+	// 由每次成功请求的 usage.credit 折算而来（上游没有"按模型的用量"接口，
+	// get-user-resource 只给套餐级积分汇总，只能实测）。选号时据此把
+	// 「该模型上免费/便宜的号」排在前面。
+	modelCost map[string]modelCostEntry
+}
+
+// modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
+func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) {
+	if model == "" {
+		return modelCostEntry{}, false
+	}
+	mc, ok := e.modelCost[model]
+	if !ok || mc.LastSeen.IsZero() {
+		return modelCostEntry{}, false
+	}
+	if now.Sub(mc.LastSeen) > modelCostTTL {
+		return modelCostEntry{}, false // 过期：时段性优惠（夜间免费）不得跨时段生效
+	}
+	return mc, true
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断期）。
@@ -154,6 +175,35 @@ type stateAccount struct {
 	// SoftStreak 连续软冷却次数（软退避指数）。旧 state.json 缺此字段 → 零值，
 	// 退避从基数重新开始（向后兼容）。
 	SoftStreak int `json:"soft_streak,omitempty"`
+
+	// ModelCost 实测扣费账本（model → 观测）。仅内存态，重启后重新学习：
+	// 成本会随上游活动（限免期/夜间免费/折扣）变化，持久化旧值反而是脏数据。
+	ModelCost map[string]stateModelCost `json:"-"`
+}
+
+// stateModelCost 单个 (账号, 模型) 的实测成本观测。
+type stateModelCost struct {
+	// CostPer1k 每千 token 的 credit 消耗（EMA 平滑）。0 = 免费。
+	// 用"每千 token"归一而非"单次 credit"：扣费随请求长度变化，
+	// 不同长度的请求之间不可比。
+	CostPer1k float64
+	// LastSeen 最近观测时刻，超过 modelCostTTL 视为失效。
+	LastSeen time.Time
+	// Samples 观测次数（供排查）。
+	Samples int
+}
+
+// modelCostTTL 成本观测的有效期。取 6 小时：既覆盖"夜间免费"这类时段性优惠的
+// 单次会话，又不至于让昨天的价格决定今天的选择——过期的免费观测若永久有效，
+// 白天会把已开始收费的号继续当成免费。
+const modelCostTTL = 6 * time.Hour
+
+// modelCostEntry 运行时成本账本（与 stateModelCost 同构，独立于持久化结构，
+// 避免账本污染 state.json）。
+type modelCostEntry struct {
+	CostPer1k float64
+	LastSeen  time.Time
+	Samples   int
 }
 
 // stateFile 持久化格式。

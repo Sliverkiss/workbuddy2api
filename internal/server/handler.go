@@ -277,12 +277,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
+	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
+	// 仍可用），必须重分配——否则会被钉在这个号上反复失败。
 	sessKey := ""
 	stickyUID := ""
 	if h.cfg.Session != nil {
 		sessKey = session.ExtractKey(body)
 		if sessKey != "" {
-			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {
+			// 用 peek.Model（缺省为空串）而非 st.model（缺省为 "-"）：
+			// 模型名参与成本账本与选号过滤，"-" 会污染成不存在的模型键。
+			if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
 				stickyUID = uid
 			}
 		}
@@ -330,12 +334,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
+		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUID(stickyUID)
+			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, peek.Model)
 			if acct == nil {
-				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
+				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）→ 解绑，本次回落普通轮换。
 				unbindSticky()
 			}
 		}
@@ -424,6 +428,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = upstream.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
+			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
+			// 供下次选号把免费/便宜的号排在前面。
+			if credit, ok := stats.Credit(); ok {
+				h.cfg.Pool.NoteModelCost(acct.UID, peek.Model, credit, stats.TotalTokens())
+			}
 			rc.Close()
 			return
 		}
@@ -438,6 +447,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
+		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
+		if credit, total, ok := usageCreditTotal(resp); ok {
+			h.cfg.Pool.NoteModelCost(acct.UID, peek.Model, credit, total)
+		}
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"

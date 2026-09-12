@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -30,8 +31,13 @@ const (
 	endpointAuthState = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
 	endpointLoginAcct = upstreamBaseCN + "/v2/plugin/login/account?state="
 	endpointAuthToken = upstreamBaseCN + "/v2/plugin/auth/token?state="
-	stateFile         = "/tmp/wb2api-login-state.json"
 )
+
+// statePath 返回登录 state 文件路径。Linux 上为 /tmp/wb2api-login-state.json（与旧版一致），
+// Windows 上原生程序不认 /tmp，故用 os.TempDir()（Windows=%TEMP%，Linux=/tmp）。
+func statePath() string {
+	return filepath.Join(os.TempDir(), "wb2api-login-state.json")
+}
 
 // commonHeaders 通用请求头
 func commonHeaders(req *http.Request) {
@@ -115,13 +121,13 @@ func main() {
 			fatal("auth state: missing state or authUrl")
 		}
 		raw, _ := json.Marshal(loginState{State: st.State})
-		if err := os.WriteFile(stateFile, raw, 0o600); err != nil {
+		if err := os.WriteFile(statePath(), raw, 0o600); err != nil {
 			fatal("write state: %v", err)
 		}
 		fmt.Println(st.AuthURL)
 
 	case "poll":
-		raw, err := os.ReadFile(stateFile)
+		raw, err := os.ReadFile(statePath())
 		if err != nil {
 			fatal("read state: %v (先跑 login url)", err)
 		}
@@ -171,7 +177,7 @@ func main() {
 		}
 		oraw, _ := json.Marshal(out)
 		fmt.Println(string(oraw))
-		os.Remove(stateFile)
+		os.Remove(statePath())
 
 	default:
 		fatal("unknown subcommand %q (want url|poll)", os.Args[1])

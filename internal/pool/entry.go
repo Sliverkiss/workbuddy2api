@@ -29,6 +29,7 @@ func (k CoolKind) String() string {
 type Status struct {
 	UID             string    `json:"uid"`
 	Nickname        string    `json:"nickname,omitempty"`
+	Realm           string    `json:"realm,omitempty"` // cn|global（按 domain 后缀判）
 	Credits         int64     `json:"credits"`
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`

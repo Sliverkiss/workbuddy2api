@@ -166,6 +166,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
+// 国际版（global）账号 DailyCheckin 路径已按域切换：国际版签到活动未开启
+// （active=false，调了回 10001 无分），UserResource 路径同样按域切换可用；
+// keepalive 保活对 global 照常执行。
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 func (s *Scheduler) RunCheckinNow() {
 	for _, st := range s.cfg.Pool.List() {
@@ -191,6 +194,7 @@ func (s *Scheduler) RunCheckinNow() {
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
 // 禁用账号跳过；无 AccessToken 的跳过；账号间限速 activityAccountDelay。
+// 国际版（global）账号同样上报：/v2/report 在 workbuddy.ai 上实测 code=0 OK。
 // 一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务。
 // 上报成功后续跑 streak 自检（checkActivityStreak）：回读连登天数，发现
 // 「上报 200 但 streak 没涨」的静默丢弃（只读 oracle，不做重试）。

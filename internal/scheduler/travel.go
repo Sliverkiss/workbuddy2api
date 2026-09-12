@@ -37,6 +37,9 @@ func travelDay(t time.Time) string {
 
 // RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检。
 // 禁用账号跳过；401/查询失败只跳过该账号本轮（不强刷 token，交 22:00 keepalive）；
+// 国际版（global）账号 DailyCheckin/UserResource 路径已按域切换，travel 接口
+// （/activity/growth/buddy/*）在 workbuddy.ai 上返回空 data（无猫/无奖励），
+// 调了无害，保留调用能力；是否启用由部署配置决定。
 // 账号间限速 travelAccountDelay。
 func (s *Scheduler) RunTravelNow() {
 	first := true

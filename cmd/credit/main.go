@@ -22,10 +22,31 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
 const billingBaseCN = "https://www.codebuddy.cn"
+
+// billingBaseGlobal 国际版 billing base（与 chat 同域）。
+const billingBaseGlobal = "https://www.workbuddy.ai"
+
+// billingBaseFor 按 domain 后缀选 billing base（与 auth.IsGlobal 同规则）。
+func billingBaseFor(domain string) string {
+	if strings.HasSuffix(domain, ".workbuddy.ai") {
+		return billingBaseGlobal
+	}
+	return billingBaseCN
+}
+
+// billingPathForDomain 按 domain 后缀选 billing 路径：国际版经网关代理的相对
+// 路径 /billing/meter/*（/v2 前缀在 workbuddy.ai 上 404，实测 2026-09-12）。
+func billingPathForDomain(domain string) string {
+	if strings.HasSuffix(domain, ".workbuddy.ai") {
+		return "/billing/meter/get-user-resource"
+	}
+	return "/v2/billing/meter/get-user-resource"
+}
 
 type authFile struct {
 	Auth struct {
@@ -98,7 +119,7 @@ func fetchUserResource(af *authFile) (remain, used, size int64, packs int, err e
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	})
-	req, err := http.NewRequest(http.MethodPost, billingBaseCN+"/v2/billing/meter/get-user-resource", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, billingBaseFor(af.Auth.Domain)+billingPathForDomain(af.Auth.Domain), bytes.NewReader(body))
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}

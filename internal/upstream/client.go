@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -266,6 +267,11 @@ type Client struct {
 
 	ChatBaseCN    string
 	BillingBaseCN string
+
+	// 国际版（workbuddy.ai）base：账号 domain 以 .workbuddy.ai 结尾时启用。
+	// backend/billing/refresh 全切 https://www.workbuddy.ai，路径不变。
+	ChatBaseGlobal    string
+	BillingBaseGlobal string
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
@@ -283,6 +289,8 @@ func New() *Client {
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
+		ChatBaseGlobal:       "https://www.workbuddy.ai",
+		BillingBaseGlobal:    "https://www.workbuddy.ai",
 	}
 }
 
@@ -295,12 +303,68 @@ func (c *Client) chatHTTP() *http.Client {
 }
 
 func (c *Client) chatBase(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		if c.ChatBaseGlobal != "" {
+			return c.ChatBaseGlobal
+		}
+	}
 	return c.ChatBaseCN
+}
+
+// chatURL 按账号域返回完整 chat 路径。
+// CN：{base}/v2/chat/completions；国际版：{base}/console/chat/completions
+// （实测国际版 v2 路径对国产模型通、对 gpt-5.4 等只在 console 路径通，
+// 为统一走 console；console 要求首条 system，由 prepareBodyFor 兜底补）。
+func (c *Client) chatURL(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return c.chatBase(a) + "/console/chat/completions"
+	}
+	return c.chatBase(a) + "/v2/chat/completions"
 }
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 func (c *Client) prepareBody(body []byte) []byte {
 	return PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot())
+}
+
+// prepareBodyFor 按账号域组装出站请求体：国际版 console 路径要求首条为
+// system（否则 11128），无 system 时补默认 system。
+func (c *Client) prepareBodyFor(a *auth.Auth, body []byte) []byte {
+	out := c.prepareBody(body)
+	if a != nil && a.IsGlobal() {
+		out = ensureConsoleSystem(out)
+	}
+	return out
+}
+
+// consoleSystemFallback console 路径补的默认 system（中性提示词，不携带指纹）。
+const consoleSystemFallback = "You are a helpful assistant."
+
+// ensureConsoleSystem 首条非 system 时头部插入默认 system；已有 system 则不动。
+func ensureConsoleSystem(src []byte) []byte {
+	if len(src) == 0 {
+		return src
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(src, &obj); err != nil {
+		return src
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return src
+	}
+	first, ok := msgs[0].(map[string]any)
+	if ok {
+		if role, _ := first["role"].(string); role == "system" || role == "developer" {
+			return src
+		}
+	}
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": consoleSystemFallback}}, msgs...)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return src
+	}
+	return out
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -318,15 +382,32 @@ func (c *Client) effortsSnapshot() map[string][]string {
 }
 
 func (c *Client) billingBase(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		if c.BillingBaseGlobal != "" {
+			return c.BillingBaseGlobal
+		}
+	}
 	return c.BillingBaseCN
 }
 
 // billing 域端点路径（billingBase + path）。balance/checkin 与 report（report.go）同域，
 // 统一走 billingJSON 发请求。
+// 国际版注意：billingBaseGlobal(www.workbuddy.ai) 不认 /v2 前缀，相对路径版
+// /billing/meter/* 经网关代理到计费服务；CN 版走 codebuddy.cn /v2 前缀版。
 const (
-	billingMeterPath = "/v2/billing/meter/get-user-resource"
-	dailyCheckinPath = "/v2/billing/meter/daily-checkin"
+	billingMeterPath       = "/v2/billing/meter/get-user-resource"
+	dailyCheckinPath       = "/v2/billing/meter/daily-checkin"
+	billingMeterPathGlobal = "/billing/meter/get-user-resource"
+	dailyCheckinPathGlobal = "/billing/meter/daily-checkin"
 )
+
+// billingPathFor 按账号域选 billing 路径。
+func billingPathFor(a *auth.Auth, cn, global string) string {
+	if a != nil && a.IsGlobal() {
+		return global
+	}
+	return cn
+}
 
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
@@ -399,8 +480,8 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))）、err 为 nil；
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	url := c.chatBase(a) + "/v2/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
+	url := c.chatURL(a)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBodyFor(a, body)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -438,8 +519,15 @@ type ModelInfo struct {
 }
 
 // FetchModels 调上游动态模型接口。
+// CN：GET {chatBase}/console/enterprises/personal/models（cli agent 白名单）。
+// 国际版（global）：该路径 500，改走"探测"模式——对候选模型表逐个用
+// {chatBase}/console/chat/completions 做最小流式探测，通的即为可用。
+// 探测结果缓存由 handler 层复用（与 CN 路径同 TTL/负缓存语义）。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+	if a != nil && a.IsGlobal() {
+		return c.fetchGlobalModels(a)
+	}
 	url := c.chatBase(a) + "/console/enterprises/personal/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -540,6 +628,128 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
+// globalProbeModels 国际版候选模型表：网页 /app bundle 的 modelOptions 去重
+// （2026-09-12 提取），探测只保留 console 路径实际可用的。
+// 大小写敏感（GPT-5 大写不认）；console 要求首条 system。
+var globalProbeModels = []string{
+	// OpenAI 系
+	"gpt-5.4", "gpt-5.3-codex", "gpt-5", "gpt-5-mini", "gpt-5-nano",
+	"gpt-4.1", "gpt-4o", "gpt-4o-mini", "o1", "o3", "o3-mini",
+	// Gemini 系（探测按 code 判定：11102=无此模型跳过，通/11133/11128=可用保留）
+	"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+	"gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-3.1-flash",
+	"gemini-3.1-flash-lite", "gemini-3.5-flash",
+	// Kimi 系
+	"kimi-k3", "kimi-k2-0905-preview", "kimi-k2-0711-preview",
+	"kimi-k2-thinking", "kimi-k2-thinking-turbo", "kimi-k2-turbo-preview",
+	"kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed",
+	// GLM 系
+	"glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2",
+	// MiniMax 系
+	"minimax-m2.5", "minimax-m2.7", "minimax-m3",
+	// DeepSeek 系
+	"deepseek-v4-flash", "deepseek-v4-flash-202605", "deepseek-v4.1-flash",
+	"deepseek-v4-pro", "deepseek-v4-pro-202606",
+	// Hunyuan 系 + auto
+	"hunyuan-2.0-thinking", "hunyuan-2.0-instruct", "hunyuan-turbos", "hunyuan-t1",
+	"hy3", "hy4-preview", "hy4-preview-x",
+	"tc-code-latest", "auto",
+}
+
+// fetchGlobalModels 国际版模型探测：6 并发最小流式探测，通的即为可用。
+// 探测请求 max_tokens=32、首条 system（gpt-5.4 拒绝 max_tokens=1，会 11133）；
+// 11102/11101（service info not found）= 该模型对此账号不可用，跳过；
+// 11133/11128（参数/格式问题）说明模型名已通过服务端解析，视为可用；
+// 其他错误（网络/401/429）为账号级问题，记 firstFatal（有可用模型时忽略，
+// 全灭时返回）。探测不罚账号：只读 Classify，不调 pool。
+func (c *Client) fetchGlobalModels(a *auth.Auth) ([]ModelInfo, error) {
+	type res struct {
+		idx int
+		id  string
+		ok  bool
+		err error
+	}
+	ch := make(chan res, len(globalProbeModels))
+	sem := make(chan struct{}, 6) // 最多 6 并发探测
+	for i, id := range globalProbeModels {
+		go func(idx int, mid string) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ok, err := c.probeGlobalModel(a, mid)
+			ch <- res{idx, mid, ok, err}
+		}(i, id)
+	}
+	tmp := make([]res, 0, len(globalProbeModels))
+	var firstFatal error
+	for range globalProbeModels {
+		r := <-ch
+		if r.err != nil && firstFatal == nil {
+			firstFatal = r.err
+		}
+		tmp = append(tmp, r)
+	}
+	// 按候选表顺序还原（/v1/models 输出稳定）。
+	sort.Slice(tmp, func(i, j int) bool { return tmp[i].idx < tmp[j].idx })
+	var out []ModelInfo
+	for _, r := range tmp {
+		if r.err == nil && r.ok {
+			out = append(out, ModelInfo{ID: r.id, Name: r.id, ContextWindow: 131072})
+		}
+	}
+	if len(out) == 0 && firstFatal != nil {
+		return nil, firstFatal
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("global models probe: no model available")
+	}
+	return out, nil
+}
+
+// probeGlobalModel 探测单个模型在国际版 console 路径是否可用。
+// 返回 (可用, 致命错误)。模型级 11102/11101 → (false, nil)；
+// 11133/11128 → (true, nil)；账号级问题（网络/401/429）→ (false, err)。
+func (c *Client) probeGlobalModel(a *auth.Auth, model string) (bool, error) {
+	body, _ := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "hi"},
+		},
+		"stream":     true,
+		"max_tokens": 32,
+	})
+	url := c.chatBase(a) + "/console/chat/completions"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	c.ChatHeaders(req, a)
+	resp, err := c.chatHTTP().Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		s := string(raw)
+		// 模型名不存在 → 跳过此模型。
+		if strings.Contains(s, `"code":11102`) || strings.Contains(s, `"code":11101`) {
+			return false, nil
+		}
+		// 模型名已解析（参数/格式问题）→ 视为可用。
+		if strings.Contains(s, `"code":11133`) || strings.Contains(s, `"code":11128`) {
+			return true, nil
+		}
+		kind := Classify(resp.StatusCode, s)
+		// 模型级不可用：跳过此模型。
+		if kind == ErrClient || kind == ErrBadParams {
+			return false, nil
+		}
+		return false, fmt.Errorf("global probe %s: upstream %d %s", model, resp.StatusCode, truncate(s, 120))
+	}
+	return true, nil
+}
+
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	now := time.Now()
@@ -551,7 +761,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	}
-	data, err := c.billingJSON(a, http.MethodPost, billingMeterPath, body)
+	data, err := c.billingJSON(a, http.MethodPost, billingPathFor(a, billingMeterPath, billingMeterPathGlobal), body)
 	if err != nil {
 		return 0, err
 	}
@@ -592,8 +802,10 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
+// 国际版：checkin-activity-status 显示 active=false（签到活动未开启），调也拿不到
+// 分；路径已按域切换，保留调用能力，是否启用由 scheduler/signin 的 IsGlobal 门控决定。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	_, err := c.billingJSON(a, http.MethodPost, dailyCheckinPath, map[string]any{})
+	_, err := c.billingJSON(a, http.MethodPost, billingPathFor(a, dailyCheckinPath, dailyCheckinPathGlobal), map[string]any{})
 	return err
 }
 

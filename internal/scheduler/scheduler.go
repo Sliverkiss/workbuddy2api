@@ -196,12 +196,22 @@ func (s *Scheduler) RunCheckinNow() {
 	}
 }
 
-// RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
+// RunActivityNow 立即对池内所有可用账号执行对话活跃上报。
 // 禁用账号跳过；无 AccessToken 的跳过；账号间限速 activityAccountDelay。
-// 一条上报同时点亮 growth 连登 + 解锁 first_buddy 任务。
-// 上报成功后续跑 streak 自检（checkActivityStreak）：回读连登天数，发现
-// 「上报 200 但 streak 没涨」的静默丢弃（只读 oracle，不做重试）。
+//
+// 每号上报 N 条（ActivityReportCount，默认 5）：N 条共用同一 conversationId
+// （wb2api-<ms>），模拟同一会话内 N 轮对话——这是领养猫（buddy/first）对话量
+// 门槛的实测刷法（chat_5 前置需 5 次对话）。requestId 各条独立（同会话多轮）。
+// 账号内 N 条之间间隔 activityReportGap（1.5s）避免秒发触发风控。
+//
+// 0/缺省 ActivityReportCount = 1 条，兼容旧行为（仅点亮连登 + 解锁 first_buddy）。
+//
+// 上报成功后：① streak 自检（回读连登，发现「200 但静默丢弃」）；
+// ② 无猫账号立即重试领养（travelAdoptForce）——对话量刚补满的新状态，不算重试，
+// 豁免 adoptTriedToday 当日防抖（旅行排程 09 点已领养过且 skip，10 点上报补满后
+// 不能依赖下一轮旅行领养，就地闭环）。
 func (s *Scheduler) RunActivityNow() {
+	count := s.cfg.ActivityReportCount
 	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
@@ -215,12 +225,26 @@ func (s *Scheduler) RunActivityNow() {
 			time.Sleep(activityAccountDelay)
 		}
 		first = false
+		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
-		if err := s.cfg.Upstream.ReportChatActivity(a, cid); err != nil {
-			log.Printf("activity %s: %v", a.UID, err)
-			continue
+		ok := 0
+		for i := 1; i <= count; i++ {
+			rid := fmt.Sprintf("%s-r%d", cid, i)
+			if err := s.cfg.Upstream.ReportChatActivity(a, cid, rid); err != nil {
+				log.Printf("activity %s: report %d/%d: %v", a.UID, i, count, err)
+				break // 本号上报失败：不再续发，streak 自检无意义
+			}
+			log.Printf("activity %s: report %d/%d ok", a.UID, i, count)
+			ok++
+			if i < count {
+				time.Sleep(activityReportGap) // 账号内 5 条之间间隔，避免秒发风控
+			}
 		}
-		s.checkActivityStreak(a) // 上报成功 → 回读 streak 自检
+		if ok < count {
+			continue // N 条未发满：streak 自检与领养均无意义，下个账号
+		}
+		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
+		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -153,31 +154,74 @@ func uidPrefix(uid string) string {
 	return uid
 }
 
+// ChatRow 请求级表格日志的结构化行（Web 管理台订阅用）。
+// 哨兵：TTFBms<=0 缺失；Tokens<0 缺失；TokPerSec<0 缺失。
+type ChatRow struct {
+	Seq       int64
+	Clock     string
+	Model     string  // 未截断的完整模型名
+	Mode      string
+	Status    int
+	UID       string  // uid8 截断展示形（与表格行同口径）
+	TTFBms    int64
+	Tokens    int
+	TokPerSec float64
+	TotalSec  float64
+	Raw       string // 打印到 stdout 的原始表格行
+}
+
+// chatRowHook 行订阅（Web 管理台经 SetChatRowHook 注入；nil = 不通知）。
+var chatRowHook struct {
+	sync.RWMutex
+	fn func(ChatRow)
+}
+
+// SetChatRowHook 注册请求行订阅（进程级单订阅；web.AttachRequestRows 使用）。
+func SetChatRowHook(fn func(ChatRow)) {
+	chatRowHook.Lock()
+	chatRowHook.fn = fn
+	chatRowHook.Unlock()
+}
+
+func notifyChatRow(row ChatRow) {
+	chatRowHook.RLock()
+	fn := chatRowHook.fn
+	chatRowHook.RUnlock()
+	if fn != nil {
+		fn(row)
+	}
+}
+
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
-// toks<0 表示 usage 缺失，显示 "-"。
+// toks<0 表示 usage 缺失，显示 "-"。打印后通知 chatRowHook（Web 管理台环形缓冲）。
 func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
 	if !chatLogEnabled {
 		return
 	}
 	seq := chatSeq.Add(1)
+	fullModel := model
 	if len(model) > 11 {
 		model = model[:11]
 	}
 	tokField := "-"
 	tokpsField := "-"
+	var tokps float64 = -1
 	if toks >= 0 {
 		tokField = fmt.Sprintf("%d", toks)
 		if total > 0 {
-			tokpsField = fmt.Sprintf("%.1f", float64(toks)/total.Seconds())
+			tokps = float64(toks) / total.Seconds()
 		} else {
-			tokpsField = "0.0"
+			tokps = 0
 		}
+		tokpsField = fmt.Sprintf("%.1f", tokps)
 	}
 	ttfbMS := "-"
+	var ttfbMs int64
 	if ttfb > 0 {
-		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
+		ttfbMs = ttfb.Milliseconds()
+		ttfbMS = fmt.Sprintf("%dms", ttfbMs)
 	}
-	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | uid=%s | TTFB=%s | tok=%s | %stok/s | total=%.1fs |\n",
+	line := fmt.Sprintf("| #%03d | %s | %s | %s | %d | uid=%s | TTFB=%s | tok=%s | %stok/s | total=%.1fs |",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -189,4 +233,18 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 		tokpsField,
 		total.Seconds(),
 	)
+	fmt.Fprintln(os.Stdout, line)
+	notifyChatRow(ChatRow{
+		Seq:       seq,
+		Clock:     time.Now().Format("15:04:05"),
+		Model:     fullModel,
+		Mode:      mode,
+		Status:    status,
+		UID:       uidPrefix(uid),
+		TTFBms:    ttfbMs,
+		Tokens:    toks,
+		TokPerSec: tokps,
+		TotalSec:  total.Seconds(),
+		Raw:       line,
+	})
 }

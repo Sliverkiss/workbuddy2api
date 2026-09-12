@@ -92,6 +92,12 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	Web struct {
+		// Disabled 显式关闭 Web 管理台（/api/* 与内嵌 SPA）。缺省 false = 启用，
+		// 与排程段的「禁用命名」风格一致（零值即全功能开启）。
+		Disabled bool `json:"disabled"`
+	} `json:"web"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`

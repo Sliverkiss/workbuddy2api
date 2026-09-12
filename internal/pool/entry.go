@@ -42,6 +42,8 @@ type Status struct {
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`
+	// SessionDeadFails 连续 12153 计数（Web 管理台徽标预警用；运行态语义，重启清零）。
+	SessionDeadFails int `json:"session_dead_fails,omitempty"`
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`

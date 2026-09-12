@@ -258,6 +258,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:        int(e.inFlight.Load()),
 		BreakerFails:    e.fails,
 		BreakerUntil:    e.breakerUntil,
+		SessionDeadFails: e.sessionDeadFails,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

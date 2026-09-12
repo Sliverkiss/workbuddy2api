@@ -132,15 +132,33 @@ func (h *Handler) gwStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// gwModels 模型列表。前端契约 {ok, models:[{id,...}]}(Node 版同源),
+// 将 /v1/models 的 OpenAI 信封 {object,data} 解包为 models。
 func (h *Handler) gwModels(w http.ResponseWriter, r *http.Request) {
 	status, raw, err := h.loopback(http.MethodGet, "/v1/models", nil)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(raw)
+	if status != http.StatusOK {
+		snippet := string(raw)
+		if len(snippet) > 300 {
+			snippet = snippet[:300]
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "models": []any{}, "error": snippet})
+		return
+	}
+	var body struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "models": []any{}, "error": err.Error()})
+		return
+	}
+	if body.Data == nil {
+		body.Data = []json.RawMessage{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": body.Data})
 }
 
 func (h *Handler) gwChatTest(w http.ResponseWriter, r *http.Request) {

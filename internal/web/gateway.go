@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/server"
 )
 
 // ReqRow 请求级表格日志行（JSON 与 Node 版 requestLogs 行契约一致）。
@@ -88,11 +90,16 @@ func (h *Handler) loopback(method, path string, body any) (int, []byte, error) {
 	return resp.StatusCode, raw, nil
 }
 
+// gwHealth 健康检查。字段与前端侧栏契约对齐:reachable/isWorkbuddy2api/
+// legacyCompatible/httpStatus(侧栏据此渲染 已连接/旧版/非本网关/不可达)。
 func (h *Handler) gwHealth(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	status, raw, err := h.loopback(http.MethodGet, "/healthz", nil)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"reachable": false, "isWorkbuddy2api": false, "legacyCompatible": false,
+			"httpStatus": 0, "error": err.Error(),
+		})
 		return
 	}
 	var hb struct {
@@ -101,8 +108,11 @@ func (h *Handler) gwHealth(w http.ResponseWriter, r *http.Request) {
 		Service string `json:"service"`
 	}
 	_ = json.Unmarshal(raw, &hb)
+	isWB := hb.Service == server.ServiceName
+	legacy := !isWB && status >= 200 && status < 300 // 旧版镜像 healthz 无 service 字段
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": status == http.StatusOK, "status": status, "service": hb.Service,
+		"reachable": true, "isWorkbuddy2api": isWB, "legacyCompatible": legacy,
+		"httpStatus": status, "service": hb.Service,
 		"healthy": hb.Healthy, "total": hb.Total, "latencyMs": time.Since(t0).Milliseconds(),
 	})
 }

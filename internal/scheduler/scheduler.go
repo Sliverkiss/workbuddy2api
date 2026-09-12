@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -184,12 +185,12 @@ func (s *Scheduler) RunCheckinNow() {
 			continue
 		}
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-			log.Printf("checkin %s: %v", st.UID, err)
+			log.Printf("checkin %s: %v", logfmt.UID8(st.UID), err)
 			// 已签到等业务错误也继续走余额查询
 		}
 		remain, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
-			log.Printf("user-resource %s: %v", st.UID, err)
+			log.Printf("user-resource %s: %v", logfmt.UID8(st.UID), err)
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
@@ -231,10 +232,10 @@ func (s *Scheduler) RunActivityNow() {
 		for i := 1; i <= count; i++ {
 			rid := fmt.Sprintf("%s-r%d", cid, i)
 			if err := s.cfg.Upstream.ReportChatActivity(a, cid, rid); err != nil {
-				log.Printf("activity %s: report %d/%d: %v", a.UID, i, count, err)
+				log.Printf("activity %s: report %d/%d: %v", logfmt.UID8(a.UID), i, count, err)
 				break // 本号上报失败：不再续发，streak 自检无意义
 			}
-			log.Printf("activity %s: report %d/%d ok", a.UID, i, count)
+			log.Printf("activity %s: report %d/%d ok", logfmt.UID8(a.UID), i, count)
 			ok++
 			if i < count {
 				time.Sleep(activityReportGap) // 账号内 5 条之间间隔，避免秒发风控
@@ -258,14 +259,14 @@ func (s *Scheduler) RunActivityNow() {
 func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	days, err := s.cfg.Upstream.GrowthStreak(a)
 	if err != nil {
-		log.Printf("activity %s: streak check failed (report OK): %v", a.UID, err)
+		log.Printf("WARN: activity %s: streak check failed (report OK): %v", logfmt.UID8(a.UID), err)
 		return true
 	}
 	if days == 0 {
-		log.Printf("activity %s: report OK but streak.days=0 (silent drop?)", a.UID)
+		log.Printf("WARN: activity %s: report OK but streak.days=0 (silent drop?)", logfmt.UID8(a.UID))
 		return true
 	}
-	log.Printf("activity %s: streak days=%d", a.UID, days)
+	log.Printf("activity %s: streak days=%d", logfmt.UID8(a.UID), days)
 	return false
 }
 
@@ -283,18 +284,18 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("keepalive %s: %v", st.UID, err)
+			log.Printf("keepalive %s: %v", logfmt.UID8(st.UID), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
-					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", st.UID, pool.SessionDeadThreshold())
+					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
 				}
 			}
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
 		if err := a.SaveAtomic(); err != nil {
-			log.Printf("keepalive %s save: %v", st.UID, err)
+			log.Printf("keepalive %s save: %v", logfmt.UID8(st.UID), err)
 		}
 	}
 }

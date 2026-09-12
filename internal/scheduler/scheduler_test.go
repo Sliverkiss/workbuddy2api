@@ -374,3 +374,255 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 	s.RunKeepaliveNow()
 	_ = errors.New("unused")
 }
+
+// checkinStub 配置化的签到上游：可控制签到响应（ok/already/fail）、刷新是否失败、
+// 余额返回值。各分支命中后 atomic 计数，便于并发安全断言。
+type checkinStub struct {
+	checkinBody    string // /daily-checkin 返回的完整 body（含 code/msg）
+	checkinStatus  int    // /daily-checkin HTTP 状态码（0=200）
+	refreshFail    bool   // /token/refresh 是否失败（返回 12153 session dead）
+	refreshCalls   atomic.Int32
+	resourceRemain int64
+}
+
+func (s *checkinStub) server() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+			if s.checkinStatus != 0 {
+				w.WriteHeader(s.checkinStatus)
+			}
+			w.Write([]byte(s.checkinBody))
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":` +
+				jsonI64(s.resourceRemain) + `,"CycleCapacityUsed":0}]}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
+			s.refreshCalls.Add(1)
+			if s.refreshFail {
+				w.WriteHeader(401)
+				w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+				return
+			}
+			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+}
+
+// newCheckinS 构造 Pool+Upstream+Scheduler，账号 token 未过期（不触发预刷新）。
+func newCheckinS(t *testing.T, stub *checkinStub) (*Scheduler, *pool.Pool) {
+	t.Helper()
+	srv := stub.server()
+	t.Cleanup(srv.Close)
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	return New(Config{Pool: p, Upstream: up}), p
+}
+
+// TestCheckinAllOK 签到成功 → ok、余额回填、credits 指针有值。
+func TestCheckinAllOK(t *testing.T) {
+	s, p := newCheckinS(t, &checkinStub{
+		checkinBody:    `{"code":0,"msg":"ok","data":{}}`,
+		resourceRemain: 500,
+	})
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(out) != 1 || out[0].Status != CheckinOK {
+		t.Fatalf("out=%+v want ok", out)
+	}
+	if out[0].Credits == nil || *out[0].Credits != 500 {
+		t.Errorf("credits=%v want 500", out[0].Credits)
+	}
+	if st, _ := p.Status("u1"); st.Credits != 500 {
+		t.Errorf("pool credits=%d want 500", st.Credits)
+	}
+}
+
+// TestCheckinAllAlready "今天已签到"记 already、不回填 400 报文到 detail。
+func TestCheckinAllAlready(t *testing.T) {
+	s, _ := newCheckinS(t, &checkinStub{
+		checkinBody:    `{"code":14001,"msg":"今天已签到"}`,
+		resourceRemain: 300,
+	})
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if out[0].Status != CheckinAlready {
+		t.Errorf("status=%q want already", out[0].Status)
+	}
+	if out[0].Detail != "" {
+		t.Errorf("已签到不应回填 detail，got=%q", out[0].Detail)
+	}
+}
+
+// TestCheckinAllFail 签到上游 500 → fail、detail 填报错。
+func TestCheckinAllFail(t *testing.T) {
+	s, _ := newCheckinS(t, &checkinStub{
+		checkinBody:    `boom`,
+		checkinStatus:  500,
+		resourceRemain: 300,
+	})
+	out, _ := s.CheckinAll()
+	if out[0].Status != CheckinFail {
+		t.Errorf("status=%q want fail", out[0].Status)
+	}
+	if out[0].Detail == "" {
+		t.Error("fail 应填 detail")
+	}
+}
+
+// TestCheckinAllSkipsDisabled 禁用账号记 skipped，不参与签到。
+func TestCheckinAllSkipsDisabled(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "dis", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Add(&auth.Auth{UID: "ok", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Disable("dis", "test")
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	m := map[string]CheckinStatus{}
+	for _, o := range out {
+		m[o.UID] = o.Status
+	}
+	if m["dis"] != CheckinSkipped {
+		t.Errorf("dis=%q want skipped", m["dis"])
+	}
+	if m["ok"] != CheckinOK {
+		t.Errorf("ok=%q want ok", m["ok"])
+	}
+}
+
+// TestCheckinAllSkipsNoCredentials 无 refreshToken 的账号记 skipped(no credentials)。
+func TestCheckinAllSkipsNoCredentials(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "notoken", AccessToken: "", RefreshToken: "", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	if out[0].Status != CheckinSkipped {
+		t.Errorf("status=%q want skipped", out[0].Status)
+	}
+	if out[0].Detail != "no credentials" {
+		t.Errorf("detail=%q want no credentials", out[0].Detail)
+	}
+}
+
+// TestCheckinAllRefreshBeforeExpiry token 临近过期 → 签到前先刷新，刷新成功后继续签到。
+func TestCheckinAllRefreshBeforeExpiry(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	// ExpiresAt 5 分钟后过期，落在 checkinRefreshSkew(10min) 窗口内 → 触发预刷新。
+	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt",
+		ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
+	p.Add(a)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	if stub.refreshCalls.Load() != 1 {
+		t.Errorf("refresh calls=%d want 1（过期窗口应预刷新）", stub.refreshCalls.Load())
+	}
+	if out[0].Status != CheckinOK {
+		t.Errorf("status=%q want ok（刷新成功后继续签到）", out[0].Status)
+	}
+	if a.AccessToken != "new" {
+		t.Errorf("token 未刷新: %s", a.AccessToken)
+	}
+}
+
+// TestCheckinAllRefreshFlakyContinues 刷新抖动失败但 token 未真过期 → 继续签到（不阻断）。
+func TestCheckinAllRefreshFlakyContinues(t *testing.T) {
+	stub := &checkinStub{
+		checkinBody:    `{"code":0,"msg":"ok","data":{}}`,
+		refreshFail:    true,
+		resourceRemain: 100,
+	}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	// token 5 分钟后过期（在窗口内 → 尝试刷新），但 NeedsRefresh(0) 仍 false（未真过期）。
+	// 刷新返回 12153 但不是真 session dead 的终态——token 仍有效，继续签到。
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt",
+		ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
+	p.Add(a)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	if out[0].Status != CheckinOK {
+		t.Errorf("status=%q want ok（刷新抖动不应阻断签到）", out[0].Status)
+	}
+	if stub.refreshCalls.Load() != 1 {
+		t.Errorf("refresh calls=%d want 1", stub.refreshCalls.Load())
+	}
+}
+
+// TestCheckinAllRefreshTrulyExpiredFails 刷新失败且 token 真过期 → 记 fail。
+func TestCheckinAllRefreshTrulyExpiredFails(t *testing.T) {
+	stub := &checkinStub{
+		checkinBody: `{"code":0,"msg":"ok","data":{}}`,
+		refreshFail: true,
+	}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	// ExpiresAt 已是过去 → NeedsRefresh(0) 为 true（真过期），刷新失败即 fail。
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1}
+	p.Add(a)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	if out[0].Status != CheckinFail {
+		t.Errorf("status=%q want fail（真过期 + 刷新失败）", out[0].Status)
+	}
+	if out[0].Detail == "" || !strings.HasPrefix(out[0].Detail, "refresh:") {
+		t.Errorf("detail=%q want refresh: 前缀", out[0].Detail)
+	}
+}
+
+// TestCheckinAllBusy 并发第二次调用返回 ErrBusy（TryLock 串行化）。
+func TestCheckinAllBusy(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
+	s, _ := newCheckinS(t, stub)
+	// 手动持锁模拟一次签到正在执行，再调 CheckinAll 应得 ErrBusy。
+	s.checkinMu.Lock()
+	defer s.checkinMu.Unlock()
+	_, err := s.CheckinAll()
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("err=%v want ErrBusy", err)
+	}
+}
+
+// TestCheckinAllReenablesCoolingAccount 冷却账号签到成功 + 余额恢复 → 解冻。
+func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 500}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
+	p.Add(a)
+	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if out[0].Status != CheckinOK {
+		t.Errorf("status=%q want ok", out[0].Status)
+	}
+	if st, _ := p.Status("u1"); st.Cooling {
+		t.Errorf("签到 + 余额恢复应解冻: %+v", st)
+	}
+}

@@ -395,6 +395,45 @@ func TestDailyCheckinAlready(t *testing.T) {
 	}
 }
 
+// TestIsAlreadyCheckin "今天已签到"判定为幂等成功（中文/英文 markers 均命中）。
+func TestIsAlreadyCheckin(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":10001,"msg":"今天已签到"}`), nil
+	})
+	if !IsAlreadyCheckin(c.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
+		t.Error("今天已签到 应判为 already")
+	}
+
+	c2 := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":10001,"msg":"Already checked in today"}`), nil
+	})
+	if !IsAlreadyCheckin(c2.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
+		t.Error("already(英文) 应判为 already")
+	}
+}
+
+// TestIsAlreadyCheckinRejectsNonUpstream 网络层/解析层错误不得当作幂等成功。
+// 误判会让当天实际未签到的账号被标成正常（停机补签遇到抖动时尤其危险）。
+func TestIsAlreadyCheckinRejectsNonUpstream(t *testing.T) {
+	if IsAlreadyCheckin(errors.New("dial tcp: connection refused")) {
+		t.Error("网络错误不得判为 already")
+	}
+	if IsAlreadyCheckin(errors.New("parse failed: unexpected EOF")) {
+		t.Error("解析错误不得判为 already")
+	}
+	// 非"已签到"语义的上游业务错误（如余额不足）也不得判为 already。
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":10002,"msg":"积分不足，请充值"}`), nil
+	})
+	if IsAlreadyCheckin(c.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
+		t.Error("余额不足不得判为 already")
+	}
+	// nil 不判为 already。
+	if IsAlreadyCheckin(nil) {
+		t.Error("nil 不得判为 already")
+	}
+}
+
 func TestBasesAlwaysCN(t *testing.T) {
 	c := testClient(nil)
 	cn := &auth.Auth{Domain: ""}

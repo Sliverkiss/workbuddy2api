@@ -83,7 +83,8 @@ func main() {
 			r.status = "OK"
 			okN++
 		default:
-			// DailyCheckin 已签到返回 code!=0 错误
+			// DailyCheckin 已签到返回 code!=0 错误；国际版活动未开启回
+			// code=10001（"签到活动未开启或已过期"），同样走 ALREADY，不算失败
 			if isAlready(err.Error()) {
 				r.status = "ALREADY"
 				r.detail = short(err.Error())
@@ -94,7 +95,7 @@ func main() {
 				failN++
 			}
 		}
-		// 顺手查余额
+		// 顺手查余额：UserResource 已按域切路径（global 走 workbuddy.ai 相对路径版）
 		if remain, qerr := up.UserResource(a); qerr == nil {
 			r.remain, r.hasQuota = remain, true
 		}
@@ -115,13 +116,19 @@ func main() {
 	fmt.Printf("\ntotal=%d ok=%d already=%d fail=%d\n", len(rows), okN, alreadyN, failN)
 }
 
-// 已签判定：code 非 0 且含 "已签到"/"already"/"checkin" 等字样
+// 已签判定：code 非 0 且含 "已签到"/"already"/"checkin" 等字样；
+// 国际版签到活动未开启时回 code=10001（"签到活动未开启或已过期"），无分可领，
+// 同样不算失败，走 ALREADY 口径。
 func isAlready(msg string) bool {
 	s := strings.ToLower(msg)
 	return strings.Contains(s, "已签到") ||
 		strings.Contains(s, "already") ||
 		strings.Contains(s, "checkin") ||
-		strings.Contains(s, "code=400")
+		strings.Contains(s, "code=400") ||
+		strings.Contains(s, "10001") ||
+		strings.Contains(s, "未开启") ||
+		strings.Contains(s, "已过期") ||
+		strings.Contains(s, "inactive")
 }
 
 func trunc(s string, n int) string {

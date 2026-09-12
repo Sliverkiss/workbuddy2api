@@ -402,9 +402,35 @@ func TestBasesAlwaysCN(t *testing.T) {
 	if c.chatBase(cn) != "https://chat.example" || c.billingBase(cn) != "https://billing.example" {
 		t.Error("cn bases wrong")
 	}
-	// 恒 CN：domain 不同不改变上游 host。
+	// 非 workbuddy.ai 后缀的 domain 不改变上游 host。
 	if c.chatBase(other) != c.chatBase(cn) || c.billingBase(other) != c.billingBase(cn) {
 		t.Error("bases must be CN regardless of domain")
+	}
+}
+
+// TestBasesGlobalByDomain 国际版账号（domain 以 .workbuddy.ai 结尾）切到
+// www.workbuddy.ai；New() 默认值即此（空 Client 字段回落 CN 不影响）。
+func TestBasesGlobalByDomain(t *testing.T) {
+	c := New()
+	cn := &auth.Auth{Domain: "copilot.tencent.com"}
+	global := &auth.Auth{Domain: "abc.workbuddy.ai"}
+	if c.chatBase(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global chatBase=%q", c.chatBase(global))
+	}
+	if c.billingBase(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global billingBase=%q", c.billingBase(global))
+	}
+	if c.chatBase(cn) != "https://copilot.tencent.com" {
+		t.Errorf("cn chatBase=%q", c.chatBase(cn))
+	}
+	if c.billingBase(cn) != "https://www.codebuddy.cn" {
+		t.Errorf("cn billingBase=%q", c.billingBase(cn))
+	}
+	if originRefererFor(global) != "https://www.workbuddy.ai" {
+		t.Errorf("global origin=%q", originRefererFor(global))
+	}
+	if originRefererFor(cn) != "https://www.codebuddy.cn" {
+		t.Errorf("cn origin=%q", originRefererFor(cn))
 	}
 }
 

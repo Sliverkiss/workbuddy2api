@@ -245,6 +245,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	st := Status{
 		UID:             uid,
 		Nickname:        e.a.Nickname,
+		Realm:           e.a.Realm(),
 		Credits:         e.credits,
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,

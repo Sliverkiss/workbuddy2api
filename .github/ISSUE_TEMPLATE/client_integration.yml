@@ -1,0 +1,161 @@
+name: 客户端接入问题
+description: 把 Codex / Cherry Studio / 各类 OpenAI SDK 等客户端接到网关后功能异常（读文件、调工具、流式中断、超时等）
+title: "[Client] 客户端名称 + 异常动作 + 现象，如：Codex 读取本地文件失败"
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > **「XX 客户端不能用 / 读不了文件」这类标题不会被处理。** 同一个现象至少有以下几种互不相容的成因，只有报文和日志能区分：
+        >
+        > - 客户端把请求发给了错误的 base_url / 协议，请求**根本没到网关**；
+        > - 请求到了网关但客户端依赖的字段（如 `tools`、`tool_calls`、`parallel_tool_calls`、`stream_options`）未被上游支持或被改写；
+        > - 网关返回正常，客户端自身解析 / 配置（如未启用工具、上下文长度、代理设置）有问题；
+        > - 上游对该输入形式（附件、长上下文、特定文件类型）有限制。
+        >
+        > **请按下表逐项填写。不适用的写「不适用」，无法提供的写「无法提供」并说明原因 —— 不要留空。** 缺关键项将按「无法复现」关闭。
+        >
+        > 另：接入前请先读 README [API 端点](https://github.com/Sliverkiss/workbuddy2api#api-端点) 与 [流式行为细节](https://github.com/Sliverkiss/workbuddy2api#流式行为细节)，确认客户端所需能力在当前实现中是否已声明支持。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前自检
+      options:
+        - label: 我已用 curl 直调网关跑通同类型请求，确认网关本身可用
+          required: true
+        - label: 我已确认客户端的 base_url 指向本网关且路径为 /v1，且 api_key 与网关一致
+          required: true
+        - label: 我已脱敏（api_key、auths token、账号 uid / 手机号、上游 Cookie）
+          required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: 客户端与版本
+      description: 精确到版本号，不要写「最新版」。
+      placeholder: 例：Codex CLI 0.4x.x / Cherry Studio 1.x.x / openai-python 1.x.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: client_config
+    attributes:
+      label: 客户端配置
+      description: 与模型 / 网关相关的配置片段（含 base_url、model、是否开启工具调用 / 附件 / 流式）。密钥打码。截图请同时附文字。
+      render: text
+      placeholder: |
+        base_url: http://127.0.0.1:7863/v1
+        model: ...
+        tools: enabled
+        stream: true
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动客户端到出现异常的最小步骤，包含你所操作的具体动作（如「让模型读取 ./main.go」）。
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: 期望行为 / 实际行为
+      description: 分别写明。异常提示、客户端日志请粘贴原文，不要只描述或只给截图。
+      value: |
+        - 期望：
+        - 实际：
+        - 客户端侧报错原文：
+        - 客户端是否存在「工具调用」「附件」「文件读取」相关的独立开关？当前状态：
+    validations:
+      required: true
+
+  - type: input
+    id: reached_gateway
+    attributes:
+      label: 请求是否到达网关
+      description: 对照网关日志时间戳判断。这一项决定问题在客户端还是在网关。
+      placeholder: 是（有对应日志行）/ 否（日志中无记录）/ 无法判断
+    validations:
+      required: true
+
+  - type: textarea
+    id: request
+    attributes:
+      label: 原始请求报文
+      description: 客户端实际发给网关的完整请求体（可通过客户端日志、抓包或网关日志获得）。必须包含 `model`、`messages`、`stream`、`tools`、`tool_choice`。缺失字段请标注「客户端未发送」。
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: response
+    attributes:
+      label: 原始响应报文
+      description: 完整原始响应。流式请贴完整 SSE 帧序列（含是否出现 `[DONE]`、是否含 `tool_calls` 增量帧），不要截断、不要只贴首尾。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 网关日志
+      description: 覆盖该次请求的完整请求级日志行，以及任何报错与堆栈原文。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: compare
+    attributes:
+      label: 对照验证
+      description: 用于定位是「协议不兼容」「网关缺陷」还是「上游限制」。每项必须回答，不适用的写「不适用」。
+      value: |
+        - curl 直复现：把上面同一请求用 curl 发给网关，结果如何？（贴命令与结果）
+        - 非流式（stream=false）是否正常？
+        - 不涉及文件读取 / 工具调用的普通对话是否正常？
+        - 换用另一个客户端（或 SDK）指向同一网关，是否正常？
+        - 是否仅在特定模型、特定文件类型 / 大小、特定语言文件上失败？
+        - 是否为「曾经可用 → 现在不可用」的退化？若是，期间客户端与网关各升级到什么版本：
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 网关侧与客户端侧的操作系统 / 容器环境，以及两端网络关系（同机 / 局域网 / 反向代理 / 隧道）。
+      placeholder: 网关：Debian 12 + Docker 24；客户端：Windows 11；网络：同机 127.0.0.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gateway_version
+    attributes:
+      label: 网关版本来源
+      description: 便于判断是否为已知问题。
+      options:
+        - "release tag / 官方镜像"
+        - "master 分支源码自行构建"
+        - "fork 或第三方修改版（请说明）"
+        - "不确定"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 已有 workaround、相关 issue 链接、抓包文件链接等。
+    validations:
+      required: false

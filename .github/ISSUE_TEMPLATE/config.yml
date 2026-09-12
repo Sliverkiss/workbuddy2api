@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用疑问 / 部署求助（Discussions Q&A）
+    url: https://github.com/Sliverkiss/workbuddy2api/discussions/categories/q-a
+    about: 不确定是否为缺陷、或需要配置帮助时，请先在 Q&A 提问；答复可被标记为答案沉淀下来。
+  - name: 安全与合规边界（README 章节）
+    url: https://github.com/Sliverkiss/workbuddy2api#安全与合规
+    about: 提交任何日志、凭据或账号信息前，请先确认这一章节的使用边界与脱敏要求。
+  - name: 部署与配置文档（README）
+    url: https://github.com/Sliverkiss/workbuddy2api#快速开始
+    about: 部署、配置字段、错误分类与常见问题已在 README 中说明，请先查阅。

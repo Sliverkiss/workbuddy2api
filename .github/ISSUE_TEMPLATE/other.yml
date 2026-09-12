@@ -1,0 +1,50 @@
+name: 其他 / 文档与兼容性反馈
+description: 文档错误、上游行为变更、兼容性观察，或不属于上面两类的其他问题
+title: "[Other] 一句话描述"
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!NOTE]
+        > 本模板用于**不适合**「缺陷报告」与「功能请求」的情况，例如：README 描述与代码不一致、上游（CodeBuddy）接口行为变化、模型可用性变化。
+        > 若是使用疑问、部署求助或不确定是否为缺陷，请走 [Discussions Q&A](https://github.com/Sliverkiss/workbuddy2api/discussions/categories/q-a)。
+        >
+        > **每一项都必须填写。不适用的写「不适用」，无法提供的写「无法提供」并说明原因。**
+
+  - type: input
+    id: topic
+    attributes:
+      label: 主题
+      description: 一句话概括。避免「有问题」「不好用」等无信息量表述。
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: 详细说明
+      description: 具体是什么？涉及哪个文档章节、哪段代码、哪个上游端点或哪条行为？请给出可核对的出处（文件路径 + 行号、README 章节、上游响应报文）。
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 相关日志、报文、截图、链接。文档问题请给出「文档怎么写的」与「实际是怎样的」对照。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境信息
+      description: 与主题相关的环境；不相关则写「不适用」。
+      value: |
+        - 项目版本（release tag 或 commit hash）：
+        - 部署方式：
+        - 客户端与版本：
+    validations:
+      required: true

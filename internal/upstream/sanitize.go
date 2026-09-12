@@ -18,6 +18,8 @@ var sanitizeFeatures = []string{
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
+	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
+	"11128",                      // 上游反探测：裸数字错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -47,6 +49,22 @@ var sanitizeRewrites = [][2]string{
 	{
 		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
 		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
+	},
+	{
+		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
+		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
+		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+	},
+	{
+		// 上游反探测：只要请求体里出现裸数字 11128 就整单拦截（与该数字的上下文无关——
+		// "code=11128" / 裸 "11128" / "错误码 11128" / "Code=11128" 全部命中；
+		// 相邻的 11148 / 11101 / 11115 / 99999 均放行）。11128 正是本类拦截自身的错误码，
+		// 上游据此识别"在讨论/回显其内部错误码"的请求。
+		// 代价：用户对话中任何 11128 都会被改写——但这串数字出现在请求里本身就是拦截条件，
+		// 不改写必然失败。插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
+		"11128",
+		"11-128",
 	},
 }
 

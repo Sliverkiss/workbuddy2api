@@ -52,6 +52,32 @@ func TestBranchRewritten(t *testing.T) {
 	}
 }
 
+// 反馈句带 Anthropic 仓库链接，上游按整句拦截（实测只留链接或只留半边均不拦）。
+// 回归用例：give→provide 一词之差即可绕过。
+func TestFeedbackSentenceRewritten(t *testing.T) {
+	in := "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"
+	out := sanitizeText(in)
+	if strings.Contains(out, "To give feedback") {
+		t.Errorf("feedback sentence not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues") {
+		t.Errorf("feedback sentence not rewritten as expected: %q", out)
+	}
+}
+
+// 上游反探测：请求体里出现裸数字 11128 即整单拦截（与上下文无关）。
+// 回归用例：该串会被改写为 11-128 以打断精确匹配。
+func TestUpstreamErrorCodeRewritten(t *testing.T) {
+	in := "upstream returned code=11128 for this request"
+	out := sanitizeText(in)
+	if strings.Contains(out, "11128") {
+		t.Errorf("error code not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "11-128") {
+		t.Errorf("error code not rewritten as expected: %q", out)
+	}
+}
+
 func TestBillingHeaderStrippedValueIrrelevant(t *testing.T) {
 	out := sanitizeText(ccHeader)
 	if strings.Contains(out, "x-anthropic-billing-header") {

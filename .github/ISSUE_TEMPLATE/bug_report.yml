@@ -1,0 +1,183 @@
+name: 缺陷报告
+description: 网关行为与预期不符（接口报错、流式异常、换号 / 冷却异常、定时任务失败等）
+title: "[Bug] 一句话描述现象，不要只写「不能用」"
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > **提交前请先确认这三件事，否则 issue 会被要求补充信息或按「无法复现」关闭：**
+        >
+        > 1. 已阅读 README 的 [快速开始](https://github.com/Sliverkiss/workbuddy2api#快速开始)、[配置说明](https://github.com/Sliverkiss/workbuddy2api#配置说明) 与 [常见问题](https://github.com/Sliverkiss/workbuddy2api#常见问题)；
+        > 2. 已排除客户端自身配置问题（用下方「最小化复现」中的 curl 直调网关验证）；
+        > 3. **已剔除所有凭据与隐私信息**：`api_key`、`auths/` 中的 token、账号 uid / 手机号 / 邮箱、上游 Cookie 头。
+        >
+        > 每一项都必须填写。**不适用的写「不适用」，确实无法提供的写「无法提供」并说明原因 —— 不要留空、不要写「不知道」。**
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前自检
+      options:
+        - label: 我已按上述要求脱敏，未包含任何凭据或账号隐私信息
+          required: true
+        - label: 我已搜索过现有 issues（含已关闭），确认这不是重复问题
+          required: true
+        - label: 我已用 curl 直调网关复现，确认问题不在客户端侧
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题摘要
+      description: 用 1–3 句话说明「做了什么 → 得到什么 → 期望什么」。禁止只写「报错了」「用不了」。
+      placeholder: |
+        调用 POST /v1/chat/completions 且 stream=true 时，客户端在收到首个正文增量前连接被切断；
+        期望是正常输出完整 SSE 帧直到 [DONE]。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从干净状态开始的最小步骤，必须可被他人照做复现。能写成命令的写成命令。
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: frequency
+    attributes:
+      label: 复现率与触发条件
+      description: 如「10 次中 7 次」「仅并发 ≥ 2 时」「仅当轮换到第 3 个账号时」；不稳定的问题请说明规律。
+      placeholder: 必现 / 10 次中 N 次 / 仅特定条件下必现（条件：___）
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 明确、可验证的期望结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际观察到的结果，并粘贴报错原文（不要转述、不要只截图结论）。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      description: 受影响的端点或子系统（可多选）。
+      multiple: true
+      options:
+        - "POST /v1/chat/completions（非流式）"
+        - "POST /v1/chat/completions（流式 SSE）"
+        - "工具调用 / tool_calls"
+        - "系统提示词体系（custom / passthrough）"
+        - "账号池 / 选号 / 会话粘性"
+        - "熔断与冷却（402 / 404 / 429）"
+        - "定时任务（签到 / 活跃 / 旅行 / 保活）"
+        - "状态持久化（state.json / Upstash）"
+        - "鉴权 / 请求体上限"
+        - "其他（在下方补充）"
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境信息
+      description: 逐行填写。版本号写 release tag 或 commit hash，不要写「最新版」。
+      value: |
+        - 项目版本（release tag 或 commit hash）：
+        - 部署方式（Docker Compose / 源码构建 / 其他）：
+        - 镜像 tag 或完整启动命令：
+        - Go 版本（源码构建时）：
+        - 客户端（类型 + 版本，如 Cherry Studio x.y.z / OpenAI SDK x.y.z / curl）：
+        - 操作系统与版本：
+        - 上游账号数量与状态（可用 / 冷却 / 熔断 各几个）：
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 有效配置
+      description: 贴出实际生效的配置（`config.json` 或环境变量覆盖）。`api_key`、`upstash.token` 必须打码；未改动的字段可省略，但要说明省略。
+      render: json
+      placeholder: |
+        {
+          "listen": ":7863",
+          "server": { "max_body_mb": 8 },
+          "prompt": { "mode": "custom" },
+          "features": { "sanitize_blacklist_fingerprints": true }
+        }
+    validations:
+      required: true
+
+  - type: textarea
+    id: request
+    attributes:
+      label: 最小化复现：网关请求
+      description: 可直接执行的 curl（URL 与 key 打码即可），或客户端实际发出的完整请求体 JSON。必须包含 `model`、`messages`、`stream`，涉及工具调用时须含 `tools` / `tool_choice`。
+      render: shell
+      placeholder: |
+        curl -sS -N http://127.0.0.1:7863/v1/chat/completions \
+          -H "Authorization: Bearer $API_KEY" \
+          -H "Content-Type: application/json" \
+          -d '{"model":"...","messages":[...],"stream":true}'
+    validations:
+      required: true
+
+  - type: textarea
+    id: response
+    attributes:
+      label: 最小化复现：网关响应
+      description: 完整原始响应。非流式贴 JSON 并在下方标注 `finish_reason` / `content` / `tool_calls` 是否为空；流式贴完整 SSE 帧序列（含最后是否有 `[DONE]`，不可截断）。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 网关日志与堆栈
+      description: 覆盖故障时间窗的完整日志（请求级表格日志一行一条，请勿只贴一行）。报错若有堆栈请原样粘贴。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: upstream_compare
+    attributes:
+      label: 对照验证
+      description: 用于区分「网关缺陷」与「上游限制」。每项都必须回答，不适用的写「不适用」。
+      value: |
+        - 同一请求在故障时刻是否命中了多个账号（是否已换号）：
+        - 是否只在特定账号 / 特定模型上失败：
+        - 该时间段 `/status` 输出（账号池、冷却、熔断状态，请脱敏 uid）：
+        - 客户端直连其它 OpenAI 兼容服务是否正常（排除客户端问题）：
+        - 问题是否为「曾经可用 → 现在不可用」的退化？若是，两次之间升级的版本与改动的配置：
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 是否有可用的 workaround、相关 issue 链接、发生时间（含时区）等。
+    validations:
+      required: false

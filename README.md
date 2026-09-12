@@ -506,6 +506,35 @@ curl -s http://localhost:7863/v1/chat/completions \
 | Redis 粘性镜像 7 天 TTL | `internal/redisstore/redisstore.go:21` |
 | 静态模型表含 `deepseek-v4-flash` 等 | `internal/server/handler.go:146` |
 
+## 问题反馈与 Issue 规范
+
+本仓库对 issue 采用**结构化模板**（GitHub Issue Forms）。新建 issue 时必须选择模板并逐项填写，模板中的必填项由 GitHub 强制校验，缺失无法提交；空白 issue 入口已关闭。
+
+### 该走哪里
+
+| 你的情况 | 去处 |
+|---|---|
+| 不确定是否为缺陷、需要部署 / 配置帮助 | [Discussions Q&A](https://github.com/Sliverkiss/workbuddy2api/discussions/categories/q-a) |
+| 网关自身行为异常（接口报错、流式中断、换号 / 冷却异常、定时任务失败） | Issue：[缺陷报告](https://github.com/Sliverkiss/workbuddy2api/issues/new?template=bug_report.yml) |
+| 把 Codex / Cherry Studio / SDK 等客户端接入后功能异常（读文件、调工具、超时） | Issue：[客户端接入问题](https://github.com/Sliverkiss/workbuddy2api/issues/new?template=client_integration.yml) |
+| 希望新增能力或改变现有行为 | Issue：[功能请求](https://github.com/Sliverkiss/workbuddy2api/issues/new?template=feature_request.yml) |
+| 文档与代码不一致、上游行为变化 | Issue：[其他 / 文档与兼容性](https://github.com/Sliverkiss/workbuddy2api/issues/new?template=other.yml) |
+
+### 反馈质量要求
+
+1. **必须附原始报文与日志**。只有现象描述（「不能用」「报错了」「读取不了文件」）的 issue 无法定位：同一现象通常对应多种互不相容的成因，只有原始请求 / 响应 / 日志能区分。
+2. **日志与报文不得截断**。流式问题需给出完整 SSE 帧序列（含是否出现 `[DONE]`）；非流式需标注 `finish_reason` / `content` / `tool_calls` 是否为空。
+3. **先自证问题不在客户端**。按模板中的 curl 直调网关复现一遍再提交，否则无法区分「网关缺陷」与「客户端配置问题」。
+4. **标题必须包含客户端 / 场景与具体现象**，不接受「xxx 用不了」这类零信息标题。
+5. **必须脱敏**：`api_key`、`auths/` 中的 token、账号 uid / 手机号 / 邮箱、上游 Cookie 头一律打码，详见[安全与合规](#安全与合规)。
+6. 不适用的项写「不适用」，确实无法提供的写「无法提供」并说明原因，**不要留空**。
+
+### 处理规则
+
+- 信息不完整的 issue 会被打上 `needs-info` 标签并要求补充；**7 天内无回应将按「无法复现」关闭**，补充后可随时重新打开。
+- 已确认的缺陷会打 `bug` 标签并排期；功能请求会打 `enhancement` 并在讨论确定方案后再动手，请勿直接提未经讨论的大改动 PR。
+- 涉及上游（CodeBuddy）侧限制、模型可用性变化的问题，若确认为上游行为，会标注结论后关闭。
+
 ## 免责声明
 
 本项目仅供学习和研究使用。使用者需遵守 CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。

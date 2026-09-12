@@ -50,6 +50,9 @@ type Scheduler struct {
 	// 避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
 	mu         sync.Mutex
 	adoptTried map[string]string
+
+	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
+	checkinMu sync.Mutex
 }
 
 // New 构建。
@@ -72,6 +75,32 @@ func New(cfg Config) *Scheduler {
 	}
 	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
 }
+
+// checkinRefreshSkew 签到前判定"token 是否临近过期"的时间窗口（10 分钟）。
+// 长时间停机/容器长期停跑后 access token 往往已过期，不先刷新则签到必然 401 白跑。
+const checkinRefreshSkew = 10 * time.Minute
+
+// CheckinStatus 单账号签到结果状态。
+type CheckinStatus string
+
+const (
+	CheckinOK      CheckinStatus = "ok"      // 签到成功
+	CheckinAlready CheckinStatus = "already" // 上游判定今天已签到（幂等重复，视为正常）
+	CheckinFail    CheckinStatus = "fail"    // 刷新 token / 签到 / 余额查询失败
+	CheckinSkipped CheckinStatus = "skipped" // 禁用账号或无有效凭证，未参与
+)
+
+// CheckinOutcome 单账号签到结果（供手动签到回执与日志汇总）。
+type CheckinOutcome struct {
+	UID      string         `json:"uid"`
+	Nickname string         `json:"nickname,omitempty"`
+	Status   CheckinStatus  `json:"status"`
+	Credits  *int64         `json:"credits,omitempty"` // 签到后余额（余额查询成功才有值）
+	Detail   string         `json:"detail,omitempty"`  // 失败/跳过原因（"已签到"不填）
+}
+
+// ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
+var ErrBusy = errors.New("checkin already running")
 
 // nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
 func nextFire(now time.Time, hours []int) time.Time {
@@ -172,29 +201,112 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
-// 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
-// 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
+// RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
 func (s *Scheduler) RunCheckinNow() {
-	for _, st := range s.cfg.Pool.List() {
+	if _, err := s.CheckinAll(); err != nil {
+		log.Printf("scheduled checkin skipped: %v", err)
+	}
+}
+
+// CheckinAll 全量签到：按需刷新 token → daily-checkin → 查余额 → 解冻冷却账号。
+// 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
+// 同一时刻只允许一次签到在跑，重复调用返回 ErrBusy（防止手动触发与定时撞车重复打上游）。
+//
+// session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
+// 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
+func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	if !s.checkinMu.TryLock() {
+		return nil, ErrBusy
+	}
+	defer s.checkinMu.Unlock()
+
+	statuses := s.cfg.Pool.List()
+	out := make([]CheckinOutcome, 0, len(statuses))
+	var okN, alreadyN, failN, skipN int
+	for _, st := range statuses {
+		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
+			oc.Status, oc.Detail = CheckinSkipped, "disabled"
+			skipN++
+			out = append(out, oc)
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
+			oc.Status, oc.Detail = CheckinSkipped, "no credentials"
+			skipN++
+			out = append(out, oc)
 			continue
 		}
+		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
+		if a.NeedsRefresh(checkinRefreshSkew) {
+			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+				log.Printf("checkin %s refresh: %v", logfmt.UID8(st.UID), err)
+				var ue *upstream.Error
+				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+					if s.cfg.Pool.NoteSessionDead(st.UID) {
+						log.Printf("WARN: checkin %s: 连续 %d 次 12153 session dead — 禁用", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
+					}
+				}
+				// 刷新只是"提前补票"：token 若仍有效，继续照常签到（否则刷新接口抖动
+				// 会让本可成功的签到被白白跳过）；真正过期才判定失败。
+				if a.NeedsRefresh(0) {
+					oc.Status, oc.Detail = CheckinFail, "refresh: "+err.Error()
+					failN++
+					out = append(out, oc)
+					continue
+				}
+			} else if err := a.SaveAtomic(); err != nil {
+				// 刷新成功但落盘失败：重启会用旧 token，必须暴露。
+				log.Printf("checkin %s save: %v", logfmt.UID8(st.UID), err)
+			}
+		}
+		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-			log.Printf("checkin %s: %v", logfmt.UID8(st.UID), err)
-			// 已签到等业务错误也继续走余额查询
+			if upstream.IsAlreadyCheckin(err) {
+				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
+				// 出现一整段 400 报文、被误读成签到失败。
+				oc.Status = CheckinAlready
+			} else {
+				oc.Status = CheckinFail
+				oc.Detail = err.Error()
+				log.Printf("checkin %s: %v", logfmt.UID8(st.UID), err)
+			}
+		} else {
+			oc.Status = CheckinOK
 		}
 		remain, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.UID8(st.UID), err)
+			oc.Status = CheckinFail
+			oc.Detail = joinDetail(oc.Detail, "resource: "+err.Error())
+			failN++
+			out = append(out, oc)
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		oc.Credits = &remain
+		switch oc.Status {
+		case CheckinOK:
+			okN++
+		case CheckinAlready:
+			alreadyN++
+		default:
+			failN++
+		}
+		out = append(out, oc)
 	}
+	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
+		len(statuses), okN, alreadyN, failN, skipN)
+	return out, nil
+}
+
+// joinDetail 拼接多段原因，避免后一段覆盖前一段的失败信息。
+func joinDetail(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + "; " + add
 }
 
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报。

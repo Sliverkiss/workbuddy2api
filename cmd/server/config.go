@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/prompt"
 )
 
@@ -37,29 +38,7 @@ type Config struct {
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
 	} `json:"cooldown"`
 
-	Schedule struct {
-		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-		TravelHours    []int `json:"travel_hours"`    // [9,21]
-		ActivityHours  []int `json:"activity_hours"`  // [10]
-		KeepaliveHours []int `json:"keepalive_hours"` // [22]
-		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled 显式禁用开关（缺省 true）。
-		//
-		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
-		//   - 空数组与 null 在老语义里已被"未配置 → 回落默认"占用，改判会静默翻转
-		//     所有老 config 的行为（用户只想删掉一行，结果关掉了签到）；bool 缺省 true
-		//     则对老配置零影响，向后完全兼容。
-		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
-		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
-		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
-		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
-		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-		// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
-		// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
-		ActivityReportCount int `json:"activity_report_count"`
-		// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
-		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
-	} `json:"schedule"`
+	Schedule config.Schedule `json:"schedule"`
 
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
@@ -133,17 +112,9 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.MaxBodyMB = 8 // 请求体上限默认 8MB
-	c.Schedule.CheckinHours = []int{9, 21}
-	c.Schedule.TravelHours = []int{9, 21}
-	c.Schedule.ActivityHours = []int{10}
-	c.Schedule.KeepaliveHours = []int{22}
-	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
-	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
-	c.Schedule.CheckinEnabled = true
-	c.Schedule.TravelEnabled = true
-	c.Schedule.ActivityEnabled = true
-	c.Schedule.KeepaliveEnabled = true
-	c.Schedule.ActivityReportCount = 5 // 领猫前置需 5 次对话，5 连发刷满 chat_5
+	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
+	// 消除 issue #49 的默认值漂移）。
+	c.Schedule = config.DefaultSchedule()
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -288,25 +259,9 @@ func (c *Config) normalize() error {
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}
-	// 空数组与 null 反序列化后覆盖掉 Default() 的排程值（键缺席才保留），在此补齐。
-	// 空 = 未配置 → 回落默认；「禁用」一律走 *_enabled=false，两者互不混淆。
-	if len(c.Schedule.CheckinHours) == 0 {
-		c.Schedule.CheckinHours = []int{9, 21}
-	}
-	if len(c.Schedule.TravelHours) == 0 {
-		c.Schedule.TravelHours = []int{9, 21}
-	}
-	if len(c.Schedule.ActivityHours) == 0 {
-		c.Schedule.ActivityHours = []int{10}
-	}
-	if len(c.Schedule.KeepaliveHours) == 0 {
-		c.Schedule.KeepaliveHours = []int{22}
-	}
-	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
-	if c.Schedule.ActivityReportCount <= 0 {
-		c.Schedule.ActivityReportCount = 1
-	}
-	if err := c.validateScheduleHours(); err != nil {
+	// 排程段归一（空数组回落默认、ActivityReportCount 归一、小时范围校验）
+	// 由 internal/config 统一实现，cmd/server 与 cmd/activity 共用同一份语义。
+	if err := c.Schedule.Normalize(); err != nil {
 		return err
 	}
 	return c.normalizePrompt()
@@ -336,29 +291,3 @@ func (c *Config) normalizePrompt() error {
 	return nil
 }
 
-// validateScheduleHours 校验排程小时落在 0-23。
-//
-// 为什么不用 `[-1]` 之类的哨兵值表意"禁用"：非法小时被静默吞掉时，用户以为关掉了签到，
-// 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
-// （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
-func (c *Config) validateScheduleHours() error {
-	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", c.Schedule.CheckinHours); err != nil {
-		return err
-	}
-	if err := checkHourRange("schedule.travel_hours", "travel_enabled", c.Schedule.TravelHours); err != nil {
-		return err
-	}
-	if err := checkHourRange("schedule.activity_hours", "activity_enabled", c.Schedule.ActivityHours); err != nil {
-		return err
-	}
-	return checkHourRange("schedule.keepalive_hours", "keepalive_enabled", c.Schedule.KeepaliveHours)
-}
-
-func checkHourRange(field, switchKey string, hours []int) error {
-	for _, h := range hours {
-		if h < 0 || h > 23 {
-			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)
-		}
-	}
-	return nil
-}

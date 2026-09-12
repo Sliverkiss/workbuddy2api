@@ -27,10 +27,18 @@ var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
+//
+// 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
+// CLI 版这句以句号收尾（"…for Claude."），桌面版（claude-desktop-3p / Agent SDK）
+// 以逗号接后继内容（"…for Claude, running within the Claude Agent SDK."）。
+// 带句号的整句只匹配前者，桌面版会漏网、指纹原样发上游 → 400 code=11128。
+// 去掉结尾标点后两种形态一并覆盖（替换串同样不带标点，让原有标点原样保留）。
+// 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
+// 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
 var sanitizeRewrites = [][2]string{
 	{
-		"You are Claude Code, Anthropic's official CLI for Claude.",
-		"You are Claude Code, Anthropic's official CLI tool for Claude.",
+		"You are Claude Code, Anthropic's official CLI for Claude",
+		"You are Claude Code, Anthropic's official CLI tool for Claude",
 	},
 	{
 		"Main branch (you will usually use this for PRs)",

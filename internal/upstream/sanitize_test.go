@@ -29,6 +29,19 @@ func TestIdentityRewritten(t *testing.T) {
 	}
 }
 
+// 桌面版（claude-desktop-3p / Agent SDK）的身份句以逗号接后继内容，结尾不是句号。
+// 回归用例：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
+func TestIdentityDesktopVariantRewritten(t *testing.T) {
+	in := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
+	out := sanitizeText(in)
+	if strings.Contains(out, "official CLI for Claude") {
+		t.Errorf("desktop identity not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "official CLI tool for Claude, running within the Claude Agent SDK.") {
+		t.Errorf("desktop identity suffix not preserved: %q", out)
+	}
+}
+
 func TestBranchRewritten(t *testing.T) {
 	out := sanitizeText(ccBranch)
 	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {

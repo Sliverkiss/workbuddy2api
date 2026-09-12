@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
@@ -367,7 +368,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := acct.SaveAtomic(); err != nil {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
-				log.Printf("chat refresh uid=%s: save auth failed: %v", acct.UID, err)
+				log.Printf("ERR: [server] chat refresh uid=%s: save auth failed: %v", logfmt.UID8(acct.UID), err)
 			}
 		}
 
@@ -393,7 +394,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
-				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
 				continue
 			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}

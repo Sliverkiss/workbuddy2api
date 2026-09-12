@@ -41,14 +41,14 @@ func (p *Pool) RestoreFromSnapshot() {
 	raw, ok := store.LoadState()
 	if !ok {
 		if localErr == nil {
-			log.Printf("pool: 恢复来源=本地 state.json（无 Redis 快照）")
+			log.Printf("[pool] 恢复来源=本地 state.json（无 Redis 快照）")
 		}
 		return
 	}
 	var snap snapshot
 	if json.Unmarshal(raw, &snap) != nil || snap.SavedAt.IsZero() {
 		// 快照无 savedAt：无法比较新旧，本地优先。
-		log.Printf("pool: 恢复来源=本地 state.json（Redis 快照无 saved_at）")
+		log.Printf("[pool] 恢复来源=本地 state.json（Redis 快照无 saved_at）")
 		return
 	}
 	if localErr == nil && !localInfo.ModTime().After(snap.SavedAt) {
@@ -57,10 +57,10 @@ func (p *Pool) RestoreFromSnapshot() {
 		p.applySnapshotLocked(snap)
 		p.mu.Unlock()
 		p.dirty.Store(true)
-		log.Printf("pool: 恢复来源=Redis 快照 (saved_at=%s)", snap.SavedAt.Format(time.RFC3339))
+		log.Printf("[pool] 恢复来源=Redis 快照 (saved_at=%s)", snap.SavedAt.Format(time.RFC3339))
 		return
 	}
-	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
+	log.Printf("[pool] 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
 }
 
 // Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
@@ -157,7 +157,7 @@ func (p *Pool) saveLocked() {
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
-		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
+		log.Printf("[pool] state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
 		p.persistFails = 0
 	}
 	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
@@ -176,9 +176,9 @@ func (p *Pool) saveLocked() {
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 func (p *Pool) notePersistFail(err error) {
 	if p.persistFails == 0 {
-		log.Printf("pool: state.json 落盘失败: %v", err)
+		log.Printf("ERR: [pool] state.json 落盘失败: %v", err)
 	} else if p.persistFails%persistLogEvery == 0 {
-		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
+		log.Printf("ERR: [pool] state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
 	}
 	p.persistFails++
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -410,7 +411,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
 		cancel()
-		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
+		log.Printf("ERR: [upstream] chat_stream uid=%s: transport error: %v", logfmt.UID8(a.UID), err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
@@ -418,8 +419,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		resp.Body.Close()
 		cancel()
 		kind := Classify(resp.StatusCode, string(raw))
-		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
-			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
+		log.Printf("WARN: [upstream] chat_stream uid=%s: upstream %d %s body=%s",
+			logfmt.UID8(a.UID), resp.StatusCode, kind, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
 	// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；

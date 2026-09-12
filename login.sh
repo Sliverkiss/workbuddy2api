@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# login.sh — WorkBuddy CN OAuth 登录 → 落盘 auth 文件
+# login.sh — WorkBuddy CN/国际版 OAuth 登录 → 落盘 auth 文件
 #
 # 用法:
-#   ./login.sh
+#   ./login.sh [--realm=cn|global]   # 默认 cn；国际版用 --realm=global
 #
 # 流程:
-#   1. POST /v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
+#   1. POST {base}/v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
 #   2. 你在浏览器打开 URL 完成登录
-#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到 → 落盘 auths/workbuddy-<uid>.json
+#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到（仅 CN，国际版跳过）→ 落盘 auths/workbuddy-<uid>.json
 #   4. 重启 workbuddy2api 容器加载新账号
 set -euo pipefail
 
 cd "$(dirname "$0")"
 AUTH_DIR="./auths"
 CONTAINER="workbuddy2api"
+# realm 参数透传给 login 二进制（默认 cn）
+REALM_ARGS=()
+REALM="cn"
+for arg in "$@"; do
+  case "$arg" in
+    --realm=*) REALM="${arg#--realm=}"; REALM_ARGS=("$arg");;
+  esac
+done
 
 mkdir -p "$AUTH_DIR"
 
@@ -28,7 +36,7 @@ echo "  WorkBuddy OAuth 登录"
 echo "============================================================"
 echo ""
 
-AUTH_URL=$("$LOGIN_BIN" url)
+AUTH_URL=$("$LOGIN_BIN" "${REALM_ARGS[@]}" url)
 
 echo "请在浏览器中打开以下链接完成登录："
 echo ""
@@ -51,7 +59,7 @@ fi
 echo ""
 echo "正在获取 token..."
 
-RESULT=$("$LOGIN_BIN" poll) || {
+RESULT=$("$LOGIN_BIN" "${REALM_ARGS[@]}" poll) || {
     echo ""
     echo "获取 token 失败。可能原因："
     echo "  - 登录还没完成就按了 y（重新运行 ./login.sh 再试）"
@@ -74,7 +82,11 @@ fi
 
 EXPIRES_AT=$(( $(date +%s) + EXPIRES_IN ))
 
-# ─── 签到（CN：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞）───
+# ─── 签到（仅 CN：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞；
+#     国际版无此体系，跳过）───
+if [[ "$REALM" == "global" ]]; then
+  echo "签到: 跳过（国际版无 CN 签到体系）"
+else
 python3 - <<PYEOF
 import json, urllib.request, urllib.error
 
@@ -107,6 +119,7 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print(f"签到: {e}")
 PYEOF
+fi
 
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
 AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"

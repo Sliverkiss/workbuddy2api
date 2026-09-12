@@ -26,6 +26,10 @@ var travelAccountDelay = 800 * time.Millisecond
 // activityAccountDelay 活跃上报账号间限速：与旅行同口径，避免上游风控。测试可置 0。
 var activityAccountDelay = 800 * time.Millisecond
 
+// activityReportGap 同一账号内连续上报之间的间隔：5 连发模拟同一会话多轮对话，
+// 秒发易触发风控，故 1.5s 一条。测试可置 0。
+var activityReportGap = 1500 * time.Millisecond
+
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
 // 不依赖容器 tzdata。
 var cstZone = time.FixedZone("CST", 8*60*60)

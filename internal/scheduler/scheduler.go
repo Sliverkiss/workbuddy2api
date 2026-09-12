@@ -26,6 +26,9 @@ type Config struct {
 	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours  []int // 默认 [10]
 	KeepaliveHours []int // 默认 [22]
+	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
+	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
+	ActivityReportCount int
 
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
@@ -61,6 +64,10 @@ func New(cfg Config) *Scheduler {
 	}
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
+	}
+	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
+	if cfg.ActivityReportCount <= 0 {
+		cfg.ActivityReportCount = 1
 	}
 	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
 }

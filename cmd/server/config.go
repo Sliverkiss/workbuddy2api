@@ -54,6 +54,9 @@ type Config struct {
 		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
 		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
+		// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
+		// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
+		ActivityReportCount int `json:"activity_report_count"`
 		// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 	} `json:"schedule"`
@@ -140,6 +143,7 @@ func Default() *Config {
 	c.Schedule.TravelEnabled = true
 	c.Schedule.ActivityEnabled = true
 	c.Schedule.KeepaliveEnabled = true
+	c.Schedule.ActivityReportCount = 5 // 领猫前置需 5 次对话，5 连发刷满 chat_5
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -297,6 +301,10 @@ func (c *Config) normalize() error {
 	}
 	if len(c.Schedule.KeepaliveHours) == 0 {
 		c.Schedule.KeepaliveHours = []int{22}
+	}
+	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
+	if c.Schedule.ActivityReportCount <= 0 {
+		c.Schedule.ActivityReportCount = 1
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err

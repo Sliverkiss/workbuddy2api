@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -253,6 +254,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_body_too_large",
 			fmt.Sprintf("请求体超过 %d MB 上限：请压缩内容或调大 server.max_body_mb 配置后重试", limit>>20))
 		return
+	}
+	// 调试开关：设置 WB2A_DUMP_REQ 即把上游侧收到的原始请求体落盘，供离线二分定位指纹命中行。
+	// 仅在排查上游指纹拦截时开启；不设置时零开销、不落盘。
+	// 只落"大请求"（超过上限一半）：小探针（{"input":"hi"} 之类）会覆盖掉真正要看的对话请求。
+	if os.Getenv("WB2A_DUMP_REQ") != "" && len(body)*2 >= int(limit) {
+		if err := os.WriteFile("/app/data/last_request.json", body, 0o600); err != nil {
+			log.Printf("ERR: [server] dump req: %v", err)
+		}
 	}
 	var peek struct {
 		Stream bool   `json:"stream"`

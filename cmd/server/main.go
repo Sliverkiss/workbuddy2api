@@ -4,10 +4,13 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/web"
 )
 
 func main() {
@@ -158,13 +162,51 @@ func main() {
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 	})
 
+	// Web 管理台（web.disabled=false 缺省启用）：/api/* 与内嵌 SPA 组合进同一监听口。
+	// 顶层 mux 精确匹配 /v1、/status、/healthz 后，GET / 兜底交给管理台（SPA 路由）。
+	var httpHandler http.Handler = h
+	if !cfg.Web.Disabled {
+		// 回环地址：listen 可能是 ":7863" / "127.0.0.1:7864" / "0.0.0.0:7863"，
+		// 统一归一到 127.0.0.1 主机形（chat-test/models 走真实 /v1 路由）。
+		loopHost := cfg.Listen
+		if strings.HasPrefix(loopHost, ":") {
+			loopHost = "127.0.0.1" + loopHost
+		} else if i := strings.LastIndex(loopHost, ":"); i >= 0 {
+			host := loopHost[:i]
+			if host == "0.0.0.0" || host == "::" || host == "[::]" || host == "" {
+				loopHost = "127.0.0.1" + loopHost[i:]
+			}
+		}
+		webH := web.NewHandler(web.Config{
+			AuthDir:      cfg.AuthDir,
+			StateDir:     filepath.Dir(cfg.StateFile),
+			Pool:         p,
+			Upstream:     up,
+			APIKey:       cfg.APIKey,
+			LoopbackBase: "http://" + loopHost,
+			Schedule:     cfg.Schedule,
+			Version:      "web-integration",
+		})
+		webH.AttachRequestRows() // 订阅请求级表格日志（server 包 hook）
+		// 进程 stderr 日志（log.Printf）镜像进管理台环形缓冲，stdout 标签页数据源。
+		log.SetOutput(io.MultiWriter(os.Stderr, webH.StdoutSink()))
+		root := http.NewServeMux()
+		root.Handle("POST /v1/chat/completions", h)
+		root.Handle("GET /v1/models", h)
+		root.Handle("GET /status", h)
+		root.Handle("GET /healthz", h)
+		root.Handle("/", webH)
+		httpHandler = root
+		log.Printf("web 管理台已启用：http://127.0.0.1%s/（/api/* 与网关同一把 api_key）", cfg.Listen)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           h,
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {

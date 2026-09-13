@@ -33,12 +33,24 @@ type Buddy struct {
 	Name string `json:"name"`
 }
 
+// TravelLocation 旅行目的地。
+type TravelLocation struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
 // TravelState 猫猫旅行状态。
 type TravelState struct {
 	State             string `json:"state"`               // idle / traveling / arrived
 	DailyLimitReached bool   `json:"daily_limit_reached"` // 今日已派出过（自然日 00:00 CST 重置）
 	RecordID          int64  `json:"record_id"`           // 在途/到站记录 id，claim 必带
 	RewardCredit      int64  `json:"reward_credit"`       // 到站可领奖励积分
+	// Web 管理台展示用富字段（纯加法；时戳经 ParseTsMs 归一为毫秒，缺失为 0）。
+	Location   *TravelLocation `json:"location,omitempty"`
+	BuddyID    int64           `json:"buddy_id,omitempty"`
+	DepartAtMs int64           `json:"depart_at_ms,omitempty"`
+	ArriveAtMs int64           `json:"arrive_at_ms,omitempty"`
+	ServerNowMs int64          `json:"server_now_ms,omitempty"`
 }
 
 // growthJSON 发 growth 域请求并解信封；body 为 nil 时不带请求体。
@@ -61,16 +73,39 @@ func (c *Client) growthJSON(a *auth.Auth, method, path string, body any) (json.R
 }
 
 // TravelStatus 查询猫猫旅行状态。
+// 时戳字段（depart_at/arrive_at/server_now）上游以秒/毫秒/字符串不定形态返回，
+// 经 aux 结构接住 RawMessage 后用 ParseTsMs 归一为毫秒。
 func (c *Client) TravelStatus(a *auth.Auth) (*TravelState, error) {
 	data, err := c.growthJSON(a, http.MethodGet, travelStatusPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	var st TravelState
-	if err := json.Unmarshal(data, &st); err != nil {
+	var aux struct {
+		TravelState
+		DepartAt  json.RawMessage `json:"depart_at"`
+		ArriveAt  json.RawMessage `json:"arrive_at"`
+		ServerNow json.RawMessage `json:"server_now"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
 		return nil, err
 	}
+	st := aux.TravelState
+	st.DepartAtMs = ParseTsMs(rawAny(aux.DepartAt))
+	st.ArriveAtMs = ParseTsMs(rawAny(aux.ArriveAt))
+	st.ServerNowMs = ParseTsMs(rawAny(aux.ServerNow))
 	return &st, nil
+}
+
+// rawAny 把 RawMessage 解为 any（供 ParseTsMs 的多形态输入）。
+func rawAny(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
 }
 
 // TravelDepart 派出猫旅行；locationID 实测 1~4（收益/时长区间相同）。

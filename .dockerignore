@@ -16,3 +16,6 @@ PLAN.md
 SPEC.md
 LOOP.md
 README.md
+# Web 前端依赖与产物(webbuild 阶段独立构建)
+web/node_modules/
+internal/web/dist/

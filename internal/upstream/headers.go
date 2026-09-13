@@ -26,6 +26,31 @@ func (c *Client) userAgent() string {
 	return clientUA
 }
 
+// resolveDeviceToken 解析本次请求的 X-Device-Token 取值。
+// 优先级：auth.Auth.DeviceToken（每号）> Client.DeviceToken（config 全局）> 文件兜底。
+// 三者皆空/读失败则返回空串（调用方不注入该头，优雅降级）。
+// 为什么不放进 CommonHeaders：鉴权/刷新类头（refresh / FetchModels）给设备 token
+// 无意义且可能被上游风控误判为异常客户端；只在 chat/billing 业务请求注入。
+func (c *Client) resolveDeviceToken(a *auth.Auth) string {
+	if a != nil && a.DeviceToken != "" {
+		return a.DeviceToken
+	}
+	if c != nil && c.DeviceToken != "" {
+		return c.DeviceToken
+	}
+	if c != nil && c.DeviceTokenFile != "" {
+		return readDeviceTokenFile(c.DeviceTokenFile)
+	}
+	return ""
+}
+
+// injectDeviceToken 在 req 注入 X-Device-Token 头（仅当取到非空 token）。
+func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
+	if tok := c.resolveDeviceToken(a); tok != "" {
+		req.Header.Set("X-Device-Token", tok)
+	}
+}
+
 // CommonHeaders 设置所有 API 共享的请求头。
 func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
@@ -63,6 +88,8 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
 	req.Header.Set("X-Product", "SaaS")
+	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入（见 resolveDeviceToken）。
+	c.injectDeviceToken(req, a)
 }
 
 // BillingHeaders billing 接口请求头。
@@ -85,6 +112,8 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	if a.Domain != "" {
 		req.Header.Set("X-Domain", a.Domain)
 	}
+	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入（见 resolveDeviceToken）。
+	c.injectDeviceToken(req, a)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。

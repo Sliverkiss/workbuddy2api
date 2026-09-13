@@ -97,6 +97,9 @@ func main() {
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 	// 出站 UA 覆盖（issue #42）：非空才改写，空 = 现状 clientUA（指纹净化考虑）。
 	up.UserAgent = cfg.Upstream.UserAgent
+	// 设备风控头（X-Device-Token）全局兜底 + 文件读取路径；空 = 不注入。
+	up.DeviceToken = cfg.Upstream.DeviceToken
+	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,

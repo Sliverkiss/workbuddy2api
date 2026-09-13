@@ -53,6 +53,14 @@ type Config struct {
 		// 桌面 UA 为 `WorkBuddy/<version>`。指纹净化考虑：默认值保持现状（可配而非改死），
 		// 仅当用户显式配置才改写。
 		UserAgent string `json:"user_agent"`
+
+		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底。
+		// 容器内无桌面端 Turing SDK，这是把外部生成的 token 注入的入口；空 = 不注入。
+		// 每号覆盖优先级：auths 文件 device_token > 本全局值 > DeviceTokenFile（文件兜底）。
+		DeviceToken string `json:"device_token"`
+		// DeviceTokenFile 宿主落盘的 device token 文件路径（可选，空 = 不读文件）。
+		// 读取频率限 5 分钟一次缓存，>1KB 或读失败则忽略（优雅降级不注入）。
+		DeviceTokenFile string `json:"device_token_file"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -193,6 +201,12 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
+		c.Upstream.DeviceToken = v
+	}
+	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
+		c.Upstream.DeviceTokenFile = v
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

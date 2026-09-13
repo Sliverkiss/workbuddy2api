@@ -271,6 +271,17 @@ type Client struct {
 	// （指纹净化考虑），仅当用户显式配置才改写。
 	UserAgent string
 
+	// DeviceToken 设备风控 Token（X-Device-Token 头）兜底来源：config upstream.device_token。
+	// 仅当 auth.Auth.DeviceToken 为空时才取此值；两者皆空则不注入该头。
+	// 容器内无桌面端 Turing SDK，这是把外部（宿主/桌面端）生成的 token 注入的入口。
+	// 另见 DeviceTokenFile 缓存读取：宿主可把 token 落 /app/data/device_token 共用。
+	DeviceToken string
+
+	// DeviceTokenFile 宿主落盘的 device token 文件路径（可选，空 = 不读文件）。
+	// 读取频率限 5 分钟一次缓存（见 device_token.go），>1KB 或读失败则忽略。
+	// 解析优先级：auth.Auth.DeviceToken > DeviceToken（config）> DeviceTokenFile（文件）。
+	DeviceTokenFile string
+
 	ChatBaseCN    string
 	BillingBaseCN string
 }

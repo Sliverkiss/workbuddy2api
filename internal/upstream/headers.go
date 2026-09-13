@@ -10,7 +10,18 @@ import (
 )
 
 const (
-	clientUA        = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
+	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本
+	// （/tmp/wb-ua-fp/step1-fingerprint.md §1.2：WORKBUDDY_CLIENT_VERSION = 桌面端
+	// package.json version，5.5.4 分发包即 5.5.4）。config upstream.client_version
+	// 可覆盖（空 = 内置默认）。
+	defaultClientVersion = "5.5.4"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI
+	// （step1 §1.4：cli/package.json publishConfig.customPackage version = 2.137.1
+	// → resolveBundledCliUserAgent() 返回 CLI/2.137.1）。config upstream.cli_version
+	// 可覆盖（空 = 内置默认）。
+	defaultCliVersion = "2.137.1"
+
 	originRefererCN = "https://www.codebuddy.cn"
 )
 
@@ -18,13 +29,54 @@ func originRefererFor(a *auth.Auth) string {
 	return originRefererCN
 }
 
-// userAgent 返回当前出站 UA：Client.UserAgent 非空则覆盖（全部出站请求生效），
-// 空 = 保持现状 clientUA。指纹净化考虑：默认值不变，仅当用户显式配置才改写。
+// clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
+// 否则内置默认 defaultClientVersion。
+func (c *Client) clientVersion() string {
+	if c != nil && c.ClientVersion != "" {
+		return c.ClientVersion
+	}
+	return defaultClientVersion
+}
+
+// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
+func (c *Client) cliVersion() string {
+	if c != nil && c.CliVersion != "" {
+		return c.CliVersion
+	}
+	return defaultCliVersion
+}
+
+// defaultWorkBuddyUA 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
+// `WorkBuddy/<clientVersion> WorkBuddy/<clientVersion> CLI/<cliVersion>`
+// （step1 §1.3：applicationName/version + platform/version + CLI/<cliVersion>；
+// SaaS 默认形态下 applicationName 与 platform 同为 WorkBuddy，两段相同）。
+// 与旧值 `CLI/2.63.2 CodeBuddy/2.63.2` 的差异：CodeBuddy 老品牌换为 WorkBuddy 三段式，
+// CLI 版本对齐官方内置 2.137.1。官方无任何 UA 随机化（step1 §4），故默认确定性。
+func (c *Client) defaultWorkBuddyUA() string {
+	return "WorkBuddy/" + c.clientVersion() + " WorkBuddy/" + c.clientVersion() + " CLI/" + c.cliVersion()
+}
+
+// userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
+// 优先级：Client.UserAgent（config user_agent）显式覆盖 > 默认 WorkBuddy 三段式。
+// 显式覆盖兼容既有覆盖逻辑：用户配了即以用户值为准（自定义品牌/版本），
+// 未配则走官方桌面端默认形态（本任务 A 段核心变更）。
 func (c *Client) userAgent() string {
 	if c != nil && c.UserAgent != "" {
 		return c.UserAgent
 	}
-	return clientUA
+	return c.defaultWorkBuddyUA()
+}
+
+// billingUA 白名单类（billing/checkin/banner）出站 UA。
+// 语义对齐官方 application-manifest.js:27590-27601（banner 白名单接口显式头组）：
+// 这类接口用单段 `WorkBuddy/<clientVersion>`（不带 CLI 段——官方 banner 显式覆写 UA
+// 为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖掉）。
+// 仅当 client_name 配置（非空）才生效；未配保持现状（BillingHeaders 不设 UA，Go 默认 UA）。
+func (c *Client) billingUA() string {
+	if c == nil || c.ClientName == "" {
+		return ""
+	}
+	return "WorkBuddy/" + c.clientVersion()
 }
 
 // resolveDeviceToken 解析本次请求的 X-Device-Token 取值。
@@ -151,14 +203,19 @@ func ExtractClientIP(r *http.Request) string {
 }
 
 // BillingHeaders billing 接口请求头。
-// UA 语义：默认**不设置**（保持现状，Go 客户端自带默认 UA）；仅当显式配置
-// c.UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
+// UA 语义（A 段对齐官方白名单头组，application-manifest.js:27590-27601）：
+//  1. 显式配置 c.UserAgent 优先（用户自定义值，全路径生效）；
+//  2. 未配但 client_name 非空 → 单段 `WorkBuddy/<clientVersion>`（官方 banner/check-in
+//     显式覆写 UA 的形态，不带 CLI 段）；
+//  3. 两者皆空 → 保持现状不设置（Go 客户端自带默认 UA）。
 func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	if c != nil && c.UserAgent != "" {
 		req.Header.Set("User-Agent", c.UserAgent)
+	} else if ua := c.billingUA(); ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)

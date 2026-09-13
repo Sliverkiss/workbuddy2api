@@ -25,6 +25,8 @@
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
     "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
     "device_token": "",
     "device_token_file": "",
     "client_name": "",

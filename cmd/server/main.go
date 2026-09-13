@@ -95,8 +95,12 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
-	// 出站 UA 覆盖（issue #42）：非空才改写，空 = 现状 clientUA（指纹净化考虑）。
+	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
+	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
 	up.UserAgent = cfg.Upstream.UserAgent
+	// 版本段（upstream.client_version / cli_version）：空 = 各走内置默认。
+	up.ClientVersion = cfg.Upstream.ClientVersion
+	up.CliVersion = cfg.Upstream.CliVersion
 	// 设备风控头（X-Device-Token）全局兜底 + 文件读取路径；空 = 不注入。
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile

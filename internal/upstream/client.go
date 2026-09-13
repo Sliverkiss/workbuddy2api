@@ -263,12 +263,13 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
-	// UserAgent 出站 User-Agent 覆盖（空 = 现状 clientUA）。
-	// 全部出站请求生效：chat / refresh / checkin / balance(含 report/travel) / FetchModels。
+	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
+	// 三段式与 billingUA 单段式）。空 = 默认官方形态：chat/refresh/FetchModels 走
+	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing/checkin 走 `WorkBuddy/<ver>`
+	// （仅当 client_name 非空，见 billingUA）。
 	// issue #42 深挖：官网「使用端」列基于出站请求的 UA/X-Product 服务端归因，
-	// 官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`（product.json applicationName=WorkBuddy，
-	// UserAgentHttpInterceptor 把 productName/platform 前缀拼进 UA）。默认保持现状
-	// （指纹净化考虑），仅当用户显式配置才改写。
+	// 官方 WorkBuddy 桌面 UA 见 defaultWorkBuddyUA。默认值已对齐官方（A 段变更），
+	// 用户仍可显式配置完全自定义的 UA。
 	UserAgent string
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头）兜底来源：config upstream.device_token。
@@ -282,10 +283,19 @@ type Client struct {
 	// 解析优先级：auth.Auth.DeviceToken > DeviceToken（config）> DeviceTokenFile（文件）。
 	DeviceTokenFile string
 
-	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type）。
+	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
-	// 非空（如 "WorkBuddy"）则三头跟随，对齐官方桌面端 client 识别。
+	// 非空（如 "WorkBuddy"）则四头跟随，对齐官方桌面端 client 识别。
 	ClientName string
+
+	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + B 段的
+	// X-IDE-Version）。空 = 内置默认 defaultClientVersion（对齐官方 5.5.4 分发包）。
+	// config upstream.client_version 覆盖。
+	ClientVersion string
+
+	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认 defaultCliVersion
+	// （对齐官方内置 CLI 2.137.1）。config upstream.cli_version 覆盖。
+	CliVersion string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
 	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 参数传入 ChatStream，

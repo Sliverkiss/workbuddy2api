@@ -646,6 +646,35 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	}
 }
 
+// TestUpstreamVersionConfig 配置 upstream.client_version / cli_version 与 env
+// WB2A_CLIENT_VERSION / WB2A_CLI_VERSION 均生效；缺省空串 = headers 层回落内置默认。
+func TestUpstreamVersionConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"client_version":"6.0.0","cli_version":"3.0.0"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.ClientVersion != "6.0.0" || c.Upstream.CliVersion != "3.0.0" {
+		t.Errorf("client_version=%q cli_version=%q want 6.0.0/3.0.0", c.Upstream.ClientVersion, c.Upstream.CliVersion)
+	}
+	// 缺省为空（headers 层回落内置默认）。
+	if c2, err := Load(""); err != nil || c2.Upstream.ClientVersion != "" || c2.Upstream.CliVersion != "" {
+		t.Errorf("default versions=%q/%q want empty (err=%v)", c2.Upstream.ClientVersion, c2.Upstream.CliVersion, err)
+	}
+	// env 覆盖。
+	t.Setenv("WB2A_CLIENT_VERSION", "7.0.0")
+	t.Setenv("WB2A_CLI_VERSION", "4.0.0")
+	c3, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Upstream.ClientVersion != "7.0.0" || c3.Upstream.CliVersion != "4.0.0" {
+		t.Errorf("env versions=%q/%q want 7.0.0/4.0.0", c3.Upstream.ClientVersion, c3.Upstream.CliVersion)
+	}
+}
+
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {

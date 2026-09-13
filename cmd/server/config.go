@@ -47,12 +47,19 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。
+		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
 		// issue #42 深挖：官网「使用端」列基于出站请求 UA 的服务端归因，官方 WorkBuddy
-		// 桌面 UA 为 `WorkBuddy/<version>`。指纹净化考虑：默认值保持现状（可配而非改死），
-		// 仅当用户显式配置才改写。
+		// 桌面 UA 为 `WorkBuddy/<version>`。默认值已对齐官方（A 段变更），用户仍可配完全
+		// 自定义值改写。
 		UserAgent string `json:"user_agent"`
+		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与白名单
+		// 头组 X-IDE-Version 的取值）。空 = 内置默认（对齐官方 5.5.4 分发包）；
+		// 显式配置（如升级后的桌面包版本）则随配置走。
+		ClientVersion string `json:"client_version"`
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（对齐官方内置 CLI
+		// 2.137.1）；显式配置则随配置走。
+		CliVersion string `json:"cli_version"`
 
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底。
 		// 容器内无桌面端 Turing SDK，这是把外部生成的 token 注入的入口；空 = 不注入。
@@ -218,6 +225,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
 	}
+	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
+		c.Upstream.ClientVersion = v
+	}
+	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
+		c.Upstream.CliVersion = v
+	}
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
@@ -319,4 +332,3 @@ func (c *Config) normalizePrompt() error {
 	}
 	return nil
 }
-

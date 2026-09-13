@@ -9,16 +9,8 @@ services:
       - "7863:7863"
     volumes:
       - ./auths:/app/auths
-      # data 用 named volume 而非 bind mount：Docker 创建 named volume 时按镜像内
-      # /app/data 的属主（app:app，Dockerfile 已 mkdir + chown）初始化所有权，
-      # 根治宿主 root:root 目录导致容器内 app(uid 10001) 写 state.json 失败（close #52）。
-      - wb2api-data:/app/data
+      # data 保持 bind mount（本地映射，与旧版本一致）。
+      # 若容器内 app(uid 10001) 写 state.json 报 permission denied，宿主机执行：
+      #   chown -R 10001:10001 ./data
+      - ./data:/app/data
       - ./config.json:/app/config.json:ro
-
-# 老用户迁移提示（bind mount ./data → named volume）：
-#   1) docker compose down
-#   2) 旧数据可直接由 Redis 快照恢复（启动时 RestoreFromSnapshot 择新）；
-#      或手动 cp -a data/* 到 volume（路径见 docker volume inspect wb2api-data）。
-#   3) auths 仍为 bind mount（网关 SaveAtomic 会回写 token，不可 :ro）。
-volumes:
-  wb2api-data:

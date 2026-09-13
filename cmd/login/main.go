@@ -1,12 +1,16 @@
-// login.go — WorkBuddy CN OAuth 登录（设备授权流程，CN realm only）。
+// login.go — WorkBuddy CN + 国际版 OAuth 登录（设备授权流程，双 realm）。
 //
-// 两个子命令，由 login.sh 顺序驱动：
+// 两个子命令，由 login.sh 顺序驱动（加 --realm=cn|global，默认 cn）:
 //
-//	login url   → POST /v2/plugin/auth/state?platform=CLI 拿 state+authUrl，
-//	              state 落 /tmp/wb2api-login-state.json，stdout 打印授权 URL
-//	login poll  → 读 state，GET /v2/plugin/auth/token?state= 一次，
-//	              成功再 GET /v2/plugin/login/account?state= 拿 uid/nickname，
-//	              stdout 打印完整 token+account JSON
+//	login [--realm=global] url   → POST {base}/v2/plugin/auth/state?platform=CLI 拿 state+authUrl,
+//	                               state 落 /tmp/wb2api-login-state.json，stdout 打印授权 URL
+//	login [--realm=global] poll  → 读 state，GET {base}/v2/plugin/auth/token?state= 一次，
+//	                               成功再 GET {base}/v2/plugin/login/account?state= 拿 uid/nickname，
+//	                               stdout 打印完整 token+account JSON（含 realm 字段）
+//
+// CN：base=https://copilot.tencent.com，Origin=https://www.codebuddy.cn
+// 国际版：base=https://www.workbuddy.ai，Origin=https://www.workbuddy.ai
+// （实测国际版 auth/state + auth/token 与 CN 同路径同信封）
 //
 // 无 PKCE（workbuddy 设备流由服务端签发 state）。
 package main
@@ -14,6 +18,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,25 +27,34 @@ import (
 	"time"
 )
 
-// 上游常量（CN only）
+// 上游常量（双 realm：CN + 国际版）
 const (
-	upstreamBaseCN    = "https://copilot.tencent.com"
-	clientUA          = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originReferer     = "https://www.codebuddy.cn"
-	endpointAuthState = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
-	endpointLoginAcct = upstreamBaseCN + "/v2/plugin/login/account?state="
-	endpointAuthToken = upstreamBaseCN + "/v2/plugin/auth/token?state="
-	stateFile         = "/tmp/wb2api-login-state.json"
+	upstreamBaseCN      = "https://copilot.tencent.com"
+	upstreamBaseGlobal  = "https://www.workbuddy.ai"
+	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	originRefererCN     = "https://www.codebuddy.cn"
+	originRefererGlobal = "https://www.workbuddy.ai"
+	stateFile           = "/tmp/wb2api-login-state.json"
 )
 
-// commonHeaders 通用请求头
-func commonHeaders(req *http.Request) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", originReferer)
-	req.Header.Set("Referer", originReferer+"/")
-	req.Header.Set("User-Agent", clientUA)
+// realmConfig 按 realm 返回 base + origin。
+func realmConfig(realm string) (base, origin string) {
+	if realm == "global" {
+		return upstreamBaseGlobal, originRefererGlobal
+	}
+	return upstreamBaseCN, originRefererCN
+}
+
+// commonHeaders 通用请求头（origin 按 realm 切换）。
+func commonHeaders(origin string) func(*http.Request) {
+	return func(req *http.Request) {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+		req.Header.Set("User-Agent", clientUA)
+	}
 }
 
 // apiEnvelope 与 main.go:429-433 一致
@@ -59,7 +73,7 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	if headers != nil {
 		headers(req)
 	} else {
-		commonHeaders(req)
+		commonHeaders(originRefererCN)(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -90,20 +104,30 @@ func fatal(format string, args ...any) {
 
 type loginState struct {
 	State string `json:"state"`
+	Realm string `json:"realm,omitempty"`
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fatal("usage: login <url|poll>")
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	realm := fs.String("realm", "cn", "login realm: cn|global")
+	_ = fs.Parse(os.Args[1:])
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fatal("usage: login [--realm=cn|global] <url|poll>")
 	}
+	base, origin := realmConfig(*realm)
+	headers := commonHeaders(origin)
+	endpointAuthState := base + "/v2/plugin/auth/state?platform=CLI"
+	endpointLoginAcct := base + "/v2/plugin/login/account?state="
+	endpointAuthToken := base + "/v2/plugin/auth/token?state="
 	// 每个流程独立 cookie jar（oauth.go:22-29：多账号登录互不串会话）
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 30 * time.Second, Jar: jar}
 
-	switch os.Args[1] {
+	switch rest[0] {
 	case "url":
 		// handleStartLogin (oauth.go:68-87)
-		data, _, err := doJSON(client, http.MethodPost, endpointAuthState, nil, bytes.NewReader([]byte("{}")))
+		data, _, err := doJSON(client, http.MethodPost, endpointAuthState, headers, bytes.NewReader([]byte("{}")))
 		if err != nil {
 			fatal("auth state failed: %v", err)
 		}
@@ -114,7 +138,7 @@ func main() {
 		if err := json.Unmarshal(data, &st); err != nil || st.State == "" || st.AuthURL == "" {
 			fatal("auth state: missing state or authUrl")
 		}
-		raw, _ := json.Marshal(loginState{State: st.State})
+		raw, _ := json.Marshal(loginState{State: st.State, Realm: *realm})
 		if err := os.WriteFile(stateFile, raw, 0o600); err != nil {
 			fatal("write state: %v", err)
 		}
@@ -129,9 +153,13 @@ func main() {
 		if err := json.Unmarshal(raw, &ls); err != nil {
 			fatal("parse state: %v", err)
 		}
+		// url 与 poll 必须同 realm：poll 用 state 落盘时的 realm（防混域）。
+		if ls.Realm != "" && ls.Realm != *realm {
+			fatal("realm mismatch: url 用 --realm=%s，poll 也要用 --realm=%s", ls.Realm, ls.Realm)
+		}
 		// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
 		// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
-		tokRaw, status, errTok := doJSON(client, http.MethodGet, endpointAuthToken+ls.State, nil, nil)
+		tokRaw, status, errTok := doJSON(client, http.MethodGet, endpointAuthToken+ls.State, headers, nil)
 		if errTok != nil {
 			if status == 0 || status >= 500 {
 				fatal("token endpoint error: %v", errTok)
@@ -154,7 +182,7 @@ func main() {
 			Nickname     string `json:"nickname"`
 		}
 		acctHeaders := func(r *http.Request) {
-			commonHeaders(r)
+			headers(r)
 			r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 		}
 		if acctRaw, _, errAcct := doJSON(client, http.MethodGet, endpointLoginAcct+ls.State, acctHeaders, nil); errAcct == nil {
@@ -165,6 +193,7 @@ func main() {
 			"refresh_token": tok.RefreshToken,
 			"expires_in":    tok.ExpiresIn,
 			"domain":        tok.Domain,
+			"realm":         *realm,
 			"uid":           acct.UID,
 			"enterprise_id": acct.EnterpriseID,
 			"nickname":      acct.Nickname,
@@ -174,6 +203,6 @@ func main() {
 		os.Remove(stateFile)
 
 	default:
-		fatal("unknown subcommand %q (want url|poll)", os.Args[1])
+		fatal("unknown subcommand %q (want url|poll)", rest[0])
 	}
 }

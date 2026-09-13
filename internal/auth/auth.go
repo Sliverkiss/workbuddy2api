@@ -41,6 +41,20 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
 }
 
+// IsGlobal 报告该账号是否属于国际版（workbuddy.ai 域）。
+// 判定规则：domain 以 .workbuddy.ai 结尾；空 domain 回落 CN（历史 CN 凭证无 domain 字段）。
+func (a *Auth) IsGlobal() bool {
+	return strings.HasSuffix(a.Domain, ".workbuddy.ai")
+}
+
+// Realm 返回账号所属域："global" 或 "cn"，供日志/调度区分。
+func (a *Auth) Realm() string {
+	if a.IsGlobal() {
+		return "global"
+	}
+	return "cn"
+}
+
 // Parse 兼容两种磁盘形态：
 //
 //	嵌套形 {"auth":{...},"account":{...}}  （插件 OAuth 输出）

@@ -181,14 +181,19 @@ def report_activity(auth, count=1, gap=1.05, model_id="deepseek-v4-flash",
 
 
 def chat_completion(auth, model_id="glm-5.2", prompt="hi", max_tokens=32,
-                    timeout=60) -> tuple:
+                    timeout=60, extra_var=None) -> tuple:
     """POST {chat}/v2/chat/completions 真实对话一次（stream:true）。
 
     服务端强制流式（payload.go 同款口径），这里逐行读 SSE 直到 done。
     返回 (status, first_content)。用于 Model_chat_GLM5.2 的“真实对话一次”。
+
+    extra_var（可选）：顶层 extra_vars 覆盖/新增字段（如 growthEvent），
+    模拟桌面端 requestOptions.providerData 的透传形状。
     """
     body = {"model": model_id, "messages": [{"role": "user", "content": prompt}],
             "stream": True, "max_tokens": max_tokens}
+    if extra_var:
+        body["extra_vars"] = {**(body.get("extra_vars") or {}), **extra_var}
     hdr = {"Accept": "text/event-stream"}  # SSE
     url = chat_base(auth) + PATH_CHAT
     req_headers = _headers(auth)

@@ -7,9 +7,9 @@
   unlock   写：report -> agreement -> buddy/first（无猫号领免费猫）
 
 用法
-  python3 probe_active.py probe  00e26541
-  python3 probe_active.py report 0225284f
-  python3 probe_active.py unlock 0225284f --yes
+  python3 probe_active.py probe  <uid>
+  python3 probe_active.py report <uid>
+  python3 probe_active.py unlock <uid> --yes
   python3 probe_active.py report ALL --yes --gap 1.05   # 全池
 
 注意

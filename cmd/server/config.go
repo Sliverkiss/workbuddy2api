@@ -61,6 +61,13 @@ type Config struct {
 		// DeviceTokenFile 宿主落盘的 device token 文件路径（可选，空 = 不读文件）。
 		// 读取频率限 5 分钟一次缓存，>1KB 或读失败则忽略（优雅降级不注入）。
 		DeviceTokenFile string `json:"device_token_file"`
+		// ClientName 用量归属头 X-Product/X-IDE-Name/X-IDE-Type 的取值。
+		// 空（缺省）= 旧行为：X-Product="SaaS"，不设 X-IDE-*（避免行为突变）。
+		// 配 "WorkBuddy" 则三头跟随该值，匹配官方桌面端用量归因。
+		ClientName string `json:"client_name"`
+		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
+		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
+		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -207,6 +214,14 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
+		c.Upstream.ClientName = v
+	}
+	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.PassthroughIP = b
+		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

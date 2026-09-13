@@ -282,6 +282,20 @@ type Client struct {
 	// 解析优先级：auth.Auth.DeviceToken > DeviceToken（config）> DeviceTokenFile（文件）。
 	DeviceTokenFile string
 
+	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type）。
+	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
+	// 非空（如 "WorkBuddy"）则三头跟随，对齐官方桌面端 client 识别。
+	ClientName string
+
+	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
+	// 缺省 false（反代安全边界）；handler 在 chat 路径按入站请求设置 ClientIP 后才生效。
+	PassthroughIP bool
+
+	// ClientIP 当前请求的客户端 IP（供 IP 透传；PassthroughIP=true 时注入）。
+	// 生命周期：单次 chat 请求——handler 在 ChatStream 前设置、调用后清空，
+	// 故仅 chat 路径生效（billing/report 等不出站客户端 IP）。
+	ClientIP string
+
 	ChatBaseCN    string
 	BillingBaseCN string
 }

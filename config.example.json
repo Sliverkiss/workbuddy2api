@@ -26,7 +26,9 @@
     "idle_timeout_seconds": 300,
     "user_agent": "",
     "device_token": "",
-    "device_token_file": ""
+    "device_token_file": "",
+    "client_name": "",
+    "passthrough_ip": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

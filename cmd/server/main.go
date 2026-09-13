@@ -100,6 +100,9 @@ func main() {
 	// 设备风控头（X-Device-Token）全局兜底 + 文件读取路径；空 = 不注入。
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	// 用量归属头（X-Product/X-IDE-*）+ 客户端 IP 透传开关（见 ChatHeaders / handler）。
+	up.ClientName = cfg.Upstream.ClientName
+	up.PassthroughIP = cfg.Upstream.PassthroughIP
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,

@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"net/http"
+	"strings"
 
 	"workbuddy2api/internal/auth"
 )
@@ -87,9 +88,63 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
 	} else {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
-	req.Header.Set("X-Product", "SaaS")
+	// 用量归属头：真实桌面端发 X-Agent-Purpose="conversation" + X-IDE-Name/Type/X-Product
+	// 识别 client，避免上游用量统计里 client/agentPurpose 为空。来源 xiaofan6ya/converter.py。
+	// 默认（ClientName 空）保持 X-Product="SaaS" 兼容现状，不设 X-IDE-*（不突变归因）；
+	// 配 ClientName（如 "WorkBuddy"）则四头跟随该值，对齐官方桌面端。
+	c.injectAttribution(req)
+	// 客户端 IP 透传：仅当 PassthroughIP=true 且本次请求 ClientIP 非空（见 handler 设置）。
+	// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）。
+	c.injectClientIP(req)
 	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入（见 resolveDeviceToken）。
 	c.injectDeviceToken(req, a)
+}
+
+// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
+// 仅在 chat/completions 路径生效（ChatHeaders 调用）。ClientName 非空时全量跟随该值，
+// 空则只保留 X-Product="SaaS"（旧行为，向后兼容）。
+func (c *Client) injectAttribution(req *http.Request) {
+	if c == nil || c.ClientName == "" {
+		req.Header.Set("X-Product", "SaaS")
+		return
+	}
+	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-IDE-Name", c.ClientName)
+	req.Header.Set("X-IDE-Type", c.ClientName)
+	req.Header.Set("X-Product", c.ClientName)
+}
+
+// injectClientIP 在 PassthroughIP 开启时把 ClientIP 透传给上游。
+// 三个等价头（X-Forwarded-For/X-Real-IP/X-Client-IP）一并设，与桌面端透传一致。
+func (c *Client) injectClientIP(req *http.Request) {
+	if c == nil || !c.PassthroughIP || c.ClientIP == "" {
+		return
+	}
+	req.Header.Set("X-Forwarded-For", c.ClientIP)
+	req.Header.Set("X-Real-IP", c.ClientIP)
+	req.Header.Set("X-Client-IP", c.ClientIP)
+}
+
+// ExtractClientIP 从入站请求提取客户端 IP 首段（X-Forwarded-For 首段，回落 X-Real-IP）。
+// 供 handler 在 PassthroughIP 开启时填充 Client.ClientIP（chat 路径出站前设置、用后清空）。
+// 取不到返回空串（handler 据此跳过透传）。
+func ExtractClientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		for i := 0; i < len(xff); i++ {
+			// 取逗号前首段并 trim 空白。
+			if xff[i] == ',' {
+				return strings.TrimSpace(xff[:i])
+			}
+		}
+		return strings.TrimSpace(xff)
+	}
+	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+		return real
+	}
+	return ""
 }
 
 // BillingHeaders billing 接口请求头。

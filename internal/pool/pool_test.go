@@ -1125,6 +1125,73 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	}
 }
 
+// TestSaveLockedPermissionDenied 不可写目录触发落盘失败：首错详报出现且无 panic，
+// persistFails 计数累加。chmod 0500 模拟容器内 app(uid 10001) 对 root:root 目录
+// 无写权限的 issue #52 场景。注意：若测试以 root 运行，chmod 不阻写——此时回落到
+// "父路径是文件"的可靠失败路径，保证测试恒定可复现。
+func TestSaveLockedPermissionDenied(t *testing.T) {
+	dir := t.TempDir()
+	stateFp := filepath.Join(dir, "state.json")
+	p := New(stateFp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 7)
+
+	// chmod 0500 让普通用户不可写；root 仍可写（见下方回落）。
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	p.Flush()
+	fails1 := p.persistFails
+
+	if fails1 == 0 {
+		// root 下 chmod 不阻写 → 回落到"父路径是文件"的可靠失败路径重测。
+		block := filepath.Join(t.TempDir(), "block")
+		if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p2 := New(filepath.Join(block, "state.json"))
+		p2.Add(&auth.Auth{UID: "u1"})
+		p2.SetCredits("u1", 7)
+		p2.Flush()
+		if p2.persistFails == 0 {
+			t.Fatal("persist failure should be recorded (chmod or block-path), got 0")
+		}
+		fails1 = p2.persistFails
+	}
+	if fails1 == 0 {
+		t.Fatal("persist failure should be recorded")
+	}
+	// 无 panic 即通过（首错详报已由 notePersistFail 打印，恢复日志由零值门槛触发）。
+}
+
+// TestSaveLockedRecover 先失败后恢复：首错详报 + 恢复日志 + persistFails 归零。
+func TestSaveLockedRecover(t *testing.T) {
+	// 阶段 1：父路径是文件 → 落盘失败，persistFails 累加。
+	block := filepath.Join(t.TempDir(), "block")
+	if err := os.WriteFile(block, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(filepath.Join(block, "state.json"))
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 42)
+	p.Flush()
+	if p.persistFails == 0 {
+		t.Fatal("first flush should fail (block path)")
+	}
+
+	// 阶段 2：切到可写目录 → 落盘成功，persistFails 归零（恢复日志由零值门槛触发）。
+	good := filepath.Join(t.TempDir(), "state.json")
+	p.stateFp = good
+	p.dirty.Store(true) // 强制再写一次
+	p.Flush()
+	if p.persistFails != 0 {
+		t.Fatalf("successful save should reset persistFails, got %d", p.persistFails)
+	}
+	if raw, err := os.ReadFile(good); err != nil || !strings.Contains(string(raw), `"credits": 42`) {
+		t.Fatalf("state.json not written on recovery: %v %s", err, raw)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // T2 熔断器 + 全冷却兜底 + 指数退避
 // ---------------------------------------------------------------------------

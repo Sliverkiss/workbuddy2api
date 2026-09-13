@@ -1,5 +1,8 @@
+//go:build unix
+
 // persist_unix.go 平台相关：从 os.FileInfo 取属主 uid/gid（Unix）。
-// 非 Unix 平台或 Sys() 返回 nil（测试 fake）时回落 0，仅影响日志可读性。
+// Sys() 返回 nil（测试 fake）时回落 0，仅影响日志可读性。
+// 非 Unix（如 Windows）由 persist_other.go 提供恒 0 回落实现。
 package pool
 
 import (

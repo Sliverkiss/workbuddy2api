@@ -292,16 +292,24 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull
 	return total, healthy, cooling, disabled, inFlightFull
 }
 
-// ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
+// ServableNow 报告池当前是否可服务：存在至少一个（对任意模型）healthy 且未占满在途名额的账号。
 // 与 CountsDetailed 的 healthy 口径不同：healthy 只看 disabled/until/breakerUntil（状态机权威判定），
 // 不看 inFlight；ServableNow 额外叠加在途维度，与 chat 的真实可达性（Pick 会跳过 inFlightFull 账号）对齐。
 // 专供 /healthz 用，避免"全账号 healthy 但都占满"时探活误报 200 而 chat 返回 503 的口径裂缝。
+//
+// 模型级豁免（issue #31 的探活侧补齐）：6004 模型级软冷却中的账号（modelExempt 形态）
+// 对触发模型不可用、对其他模型仍可选——chat 的 healthyForModel 已按此放行切模型请求，
+// 探活必须同口径，否则"全号被 v4.1 限流但 glm 可用"时 chat 实际 200 而 /healthz 误报 503。
+// /healthz 无请求模型上下文，取"存在可服务模型"的存在性语义（与 chat 可达性等价）。
 func (p *Pool) ServableNow() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
 	for _, e := range p.byUID {
-		if e.healthy(now) && !p.inFlightFull(e) {
+		if p.inFlightFull(e) {
+			continue
+		}
+		if e.healthy(now) || e.modelExempt() {
 			return true
 		}
 	}

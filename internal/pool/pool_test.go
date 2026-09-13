@@ -942,6 +942,61 @@ func TestPickExcludingForModelBreakerStillBlocks(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// ServableNow 的模型级豁免（issue #31 探活侧）：6004 单模型限流时，账号对该模型
+// 不可用但对其他模型仍可选，/healthz 不得因"全号被某一模型限流"而误报 503。
+// ---------------------------------------------------------------------------
+
+func TestServableNowModelExemptCounts(t *testing.T) {
+	// 单号处于 6004 模型级软冷却（带解析时间、记录 softRateModel）→ 其他模型仍可达，
+	// ServableNow 必须为 true（与 chat 的 healthyForModel 放行切模型请求同口径）。
+	// 反向（同模型不可选）已由 TestPickExcludingForModelSkipsSoftCoolingSameModel 覆盖；
+	// 本池无其他候选，同模型选号会走全冷却兜底，不在此重复断言。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	if !p.ServableNow() {
+		t.Fatal("model-exempt account must keep pool servable (other models reachable)")
+	}
+}
+
+func TestServableNowPlainSoftNotExempt(t *testing.T) {
+	// 普通软冷却（无 softRateModel，非 6004 模型级）→ 账号级不可用，ServableNow 必须 false。
+	// 守门：豁免不得从模型级泄漏到普通冷却。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit")
+	if p.ServableNow() {
+		t.Fatal("plain soft cooling (no model) must NOT be servable")
+	}
+}
+
+func TestServableNowExemptButInFlightFull(t *testing.T) {
+	// 模型豁免形态 + 在途占满 → 仍不可服务（在途维度独立于豁免，探活须叠加判定）。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetMaxInFlight(1)
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	if !p.Acquire("u1") {
+		t.Fatal("acquire should succeed at max=1")
+	}
+	defer p.Release("u1")
+	if p.ServableNow() {
+		t.Fatal("model-exempt but in-flight-full account must not count as servable")
+	}
+}
+
+func TestServableNowExemptButDisabled(t *testing.T) {
+	// 模型豁免形态 + 被禁用（session dead）→ disabled 优先级最高，ServableNow 必须 false。
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "429 rate limit")
+	p.Disable("u1", "session dead")
+	if p.ServableNow() {
+		t.Fatal("disabled account must never be servable, even in model-exempt form")
+	}
+}
+
 // TestSoftRateModelClearedByPlainCooldown 回归：6004 模型冷却后，若账号又经历一次
 // **非模型级**软冷却（plain Cooldown），softRateModel 必须被清空——否则上次 6004 的
 // 模型豁免会泄漏到本次账号级限流上，导致"换模型请求"错误绕过本次冷却。

@@ -78,11 +78,42 @@ func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 		e *entry
 		w float64
 	}
-	ws := make([]weighted, len(cands))
-	for i, e := range cands {
-		ws[i] = weighted{e: e, w: p.weightOf(e, maxCredits, now)}
+	// 成本分层：reqModel 非空时，按该模型的实测扣费把候选分层，只保留最优层。
+	//   0 = 已实测免费（限免期/夜间免费的号，最强偏好）
+	//   1 = 无观测（含观测过期）
+	//   2 = 已实测收费
+	// 为什么"无观测"排在"已实测收费"之前：新号的限免状态只能靠实测发现，
+	// 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
+	// 为什么用硬过滤而非仅排序：pickWeighted 会在候选内加权随机，只排序的话
+	// 收费号仍有机会抽中，达不到"优先免费"的语义。
+	costTier := func(e *entry) (int, float64) {
+		mc, ok := e.modelCostOf(reqModel, now)
+		if !ok {
+			return 1, 0
+		}
+		if mc.CostPer1k <= 0 {
+			return 0, 0
+		}
+		return 2, mc.CostPer1k
+	}
+	bestTier := 2
+	for _, e := range cands {
+		if ti, _ := costTier(e); ti < bestTier {
+			bestTier = ti
+		}
+	}
+	ws := make([]weighted, 0, len(cands))
+	for _, e := range cands {
+		if ti, _ := costTier(e); ti == bestTier {
+			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now)})
+		}
 	}
 	sort.Slice(ws, func(i, j int) bool {
+		_, ci := costTier(ws[i].e)
+		_, cj := costTier(ws[j].e)
+		if ci != cj {
+			return ci < cj // 同层且收费时：单价低的在前
+		}
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}

@@ -69,6 +69,9 @@ func main() {
 			GCInterval: cfg.SessionGCInterval,
 			Store:      store,
 			Available:  p.AvailableUIDs,
+			// 按模型的可用性口径：绑定号在当前模型被 6004 限额时重分配，
+			// 而不是被钉在这个号上反复失败。
+			AvailableForModel: p.AvailableUIDsForModel,
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()

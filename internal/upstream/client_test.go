@@ -66,6 +66,31 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestContentBlockedClientMessage(t *testing.T) {
+	cases := []struct {
+		body    string
+		keyword string
+	}{
+		{`{"code":11128,"msg":"blocked by security policy"}`, "违禁词"},
+		{`{"code":"11128","msg":"blocked by security policy"}`, "违禁词"},
+		{`Illegal API invocation from an unapproved channel`, "违禁词"},
+		{`{"code":11128,"msg":"content contains NSFW material"}`, "nsfw"},
+		{`{"msg":"命中色情内容"}`, "色情"},
+		{`violence detected`, "violence"},
+		{"", "违禁词"},
+	}
+	for _, c := range cases {
+		got := ContentBlockedClientMessage(c.body)
+		want := fmt.Sprintf("触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[%s]，已被拦截。请修改内容后重试。", c.keyword)
+		if got != want {
+			t.Errorf("ContentBlockedClientMessage(%q)=\n%q\nwant %q", c.body, got, want)
+		}
+		if strings.Contains(got, "11128") || strings.Contains(got, "account") || strings.Contains(got, "账号") || strings.Contains(got, "upstream") {
+			t.Errorf("client message must not leak code/account wording: %s", got)
+		}
+	}
+}
+
 // TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {

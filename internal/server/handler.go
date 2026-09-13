@@ -405,7 +405,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			kind := upstream.Classify(status, string(respBody))
 			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
-			// 第二次仍被拦（用户内容本身触发审核）→ 走既有错误路径返回客户端。
+			// 第二次仍被拦（用户内容本身触发审核）→ 走内容防火墙错误返回客户端。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
 			if kind == upstream.ErrContentBlocked && h.cfg.PromptMode == "passthrough" && !degradedApplied {
 				h.degrade.Trigger()
@@ -415,6 +415,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				releaseHeld()
 				log.Printf("WARN: [server] content-blocked (likely fingerprint false positive) -> degraded prompt retry")
 				continue
+			}
+			if kind == upstream.ErrContentBlocked {
+				// 内容命中网关防火墙：立即返回客户端，不轮转、不暴露账号/冷却语义。
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), peek.Model)
+				fail(acct.UID)
+				msg := upstream.ContentBlockedClientMessage(string(respBody))
+				writeOpenAIError(w, http.StatusBadRequest, "content_blocked", msg)
+				st.status = http.StatusBadRequest
+				return
 			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), peek.Model)
@@ -469,7 +478,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
 // kind 是唯一权威分类（来自 upstream.Classify），此处不再按原始 status 二次判断。
-// 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
+// 仅在 chatCompletions 轮转循环内调用。内容拦截会立即 400 返回，其余种类 continue 换号。
 //
 // 七条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
@@ -518,8 +527,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
 	case upstream.ErrContentBlocked:
-		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
-		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
+		// 内容策略拦截：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
+		// passthrough 首遇由 chatCompletions 降级重试；最终仍拦则回 400 content_blocked。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，

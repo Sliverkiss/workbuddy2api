@@ -110,6 +110,46 @@ var contentBlockedMarkers = []string{
 	"illegal api invocation",
 }
 
+// contentBlockedClientMsg 内容拦截返回给调用方的固定文案。
+// [关键词] 填分类词（色情 / nsfw / 暴力 等），绝不填业务 code、账号、冷却、upstream 前缀。
+const contentBlockedClientMsg = "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[%s]，已被拦截。请修改内容后重试。"
+
+const contentBlockedFallbackKeyword = "违禁词"
+
+// contentBlockedKeywords 审核分类词，按优先级扫描上游文案（大小写不敏感）。
+// 只收录可直接展示给调用方的分类标签，不收录错误码。
+var contentBlockedKeywords = []string{
+	"色情", "porn", "nsfw", "adult",
+	"暴力", "violence",
+	"政治", "politics",
+	"赌博", "gambling",
+	"毒品", "drug",
+	"违禁词",
+}
+
+// ContentBlockedClientMessage 把上游内容拦截改写成网关防火墙口径，不含账号/错误码。
+func ContentBlockedClientMessage(body string) string {
+	return fmt.Sprintf(contentBlockedClientMsg, contentBlockedKeyword(body))
+}
+
+// contentBlockedKeyword 从审核文案抽出分类关键词；抽不到则回「违禁词」。
+func contentBlockedKeyword(body string) string {
+	text := body
+	var env struct {
+		Msg string `json:"msg"`
+	}
+	if json.Unmarshal([]byte(body), &env) == nil && strings.TrimSpace(env.Msg) != "" {
+		text = env.Msg
+	}
+	lower := strings.ToLower(text)
+	for _, kw := range contentBlockedKeywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return kw
+		}
+	}
+	return contentBlockedFallbackKeyword
+}
+
 // badParamsMarkers 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
 // "Unmarshal chat params failed..."（code 11101）。这是"发给上游的 body 有问题"，
 // 与账号健康无关——不罚号，但仍轮转（commit B）。

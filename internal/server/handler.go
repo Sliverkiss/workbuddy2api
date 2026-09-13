@@ -385,13 +385,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 客户端 IP 透传（仅 PassthroughIP 开启）：每次出站前从入站请求取首段设到 Client，
-		// 用后清空，保证仅 chat 路径生效且不跨请求串扰。
+		// 客户端 IP 透传（仅 PassthroughIP 开启）：按请求取首段作为参数传入 ChatStream，
+		// 不再读写共享字段——并发请求各自携带独立 IP，互不串扰（issue：ClientIP 竞态）。
+		var clientIP string
 		if h.cfg.Upstream.PassthroughIP {
-			h.cfg.Upstream.ClientIP = upstream.ExtractClientIP(r)
+			clientIP = upstream.ExtractClientIP(r)
 		}
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
-		h.cfg.Upstream.ClientIP = "" // 用后即清：不残留到 billing/其他路径
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body, clientIP)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。

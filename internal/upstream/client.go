@@ -288,13 +288,9 @@ type Client struct {
 	ClientName string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
-	// 缺省 false（反代安全边界）；handler 在 chat 路径按入站请求设置 ClientIP 后才生效。
+	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 参数传入 ChatStream，
+	// 由 ChatHeaders 注入（不再挂共享字段，杜绝并发串扰）。
 	PassthroughIP bool
-
-	// ClientIP 当前请求的客户端 IP（供 IP 透传；PassthroughIP=true 时注入）。
-	// 生命周期：单次 chat 请求——handler 在 ChatStream 前设置、调用后清空，
-	// 故仅 chat 路径生效（billing/report 等不出站客户端 IP）。
-	ClientIP string
 
 	ChatBaseCN    string
 	BillingBaseCN string
@@ -428,15 +424,17 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 }
 
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
+// clientIP 为本次请求的客户端 IP（PassthroughIP=true 时注入；空串表示不透传）。
+// 按**请求传递**而非读共享字段：避免并发请求交叉污染对方 IP（issue：ClientIP 竞态）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))）、err 为 nil；
 // 只有传输层失败才返回 err。
-func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	c.ChatHeaders(req, a)
+	c.ChatHeaders(req, a, clientIP)
 	ctx, cancel := context.WithCancel(context.Background())
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)

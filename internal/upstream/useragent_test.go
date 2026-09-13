@@ -31,7 +31,7 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 		{
 			name: "chat",
 			call: func(c *Client) error {
-				rc, status, _, err := c.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, []byte(`{"model":"glm-5.2","messages":[]}`))
+				rc, status, _, err := c.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, []byte(`{"model":"glm-5.2","messages":[]}`), "")
 				if status != 200 {
 					t.Fatalf("chat status=%d", status)
 				}
@@ -91,7 +91,7 @@ func TestUserAgentOverrideAllOutbound(t *testing.T) {
 		UserAgent:     ua,
 	}
 	// chat
-	if rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`)); status != 200 || err != nil {
+	if rc, status, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4-flash","messages":[]}`), ""); status != 200 || err != nil {
 		t.Errorf("chat: status=%d err=%v", status, err)
 	} else if rc != nil {
 		rc.Close()

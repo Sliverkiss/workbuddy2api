@@ -269,7 +269,7 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[` +
 		`{"role":"system","content":"` + ccIdentity + ` ` + ccHeader + `"},` +
 		`{"role":"user","content":"hi"}]}`)
-	rc, status, respBody, err := c.ChatStream(acct, body)
+	rc, status, respBody, err := c.ChatStream(acct, body, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 	body := []byte(`{"model":"kimi-k3","messages":[` +
 		`{"role":"system","content":"` + codexInstructions + `"},` +
 		`{"role":"user","content":"say ok"}]}`)
-	rc, status, respBody, err := c.ChatStream(acct, body)
+	rc, status, respBody, err := c.ChatStream(acct, body, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"system","content":"` + ccIdentity + `"}]}`)
-	rc, status, _, err := c.ChatStream(acct, body)
+	rc, status, _, err := c.ChatStream(acct, body, "")
 	if err != nil {
 		t.Fatal(err)
 	}

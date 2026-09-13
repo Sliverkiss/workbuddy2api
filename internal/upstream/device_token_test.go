@@ -23,7 +23,7 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 		apply     func(c *Client, req *http.Request)
 		wantPath  string
 	}{
-		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a) }, "/v2/chat/completions"},
+		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "") }, "/v2/chat/completions"},
 		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 		// DeviceToken / DeviceTokenFile 皆空
 	}
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-	c.ChatHeaders(req, a)
+	c.ChatHeaders(req, a, "")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -124,7 +124,7 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 				DeviceTokenFile: fp,
 			}
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-			c.ChatHeaders(req, a)
+			c.ChatHeaders(req, a, "")
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				t.Fatalf("do: %v", err)

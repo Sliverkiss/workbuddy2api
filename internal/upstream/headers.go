@@ -65,7 +65,9 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
-func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
+// clientIP 为本次请求的客户端 IP（按参数传递，不读共享字段——避免并发串扰）；
+// PassthroughIP=false 或 clientIP 为空时不注入 IP 头。
+func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string) {
 	c.CommonHeaders(req, a)
 	if a.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+a.AccessToken)
@@ -93,9 +95,9 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
 	// 默认（ClientName 空）保持 X-Product="SaaS" 兼容现状，不设 X-IDE-*（不突变归因）；
 	// 配 ClientName（如 "WorkBuddy"）则四头跟随该值，对齐官方桌面端。
 	c.injectAttribution(req)
-	// 客户端 IP 透传：仅当 PassthroughIP=true 且本次请求 ClientIP 非空（见 handler 设置）。
+	// 客户端 IP 透传：仅当 PassthroughIP=true 且本次请求 clientIP 参数非空（见 handler 设置）。
 	// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）。
-	c.injectClientIP(req)
+	c.injectClientIP(req, clientIP)
 	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入（见 resolveDeviceToken）。
 	c.injectDeviceToken(req, a)
 }
@@ -114,19 +116,20 @@ func (c *Client) injectAttribution(req *http.Request) {
 	req.Header.Set("X-Product", c.ClientName)
 }
 
-// injectClientIP 在 PassthroughIP 开启时把 ClientIP 透传给上游。
+// injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游。
 // 三个等价头（X-Forwarded-For/X-Real-IP/X-Client-IP）一并设，与桌面端透传一致。
-func (c *Client) injectClientIP(req *http.Request) {
-	if c == nil || !c.PassthroughIP || c.ClientIP == "" {
+// 按**参数传递**而非读共享字段：避免并发请求交叉污染对方 IP（issue：ClientIP 竞态）。
+func (c *Client) injectClientIP(req *http.Request, clientIP string) {
+	if c == nil || !c.PassthroughIP || clientIP == "" {
 		return
 	}
-	req.Header.Set("X-Forwarded-For", c.ClientIP)
-	req.Header.Set("X-Real-IP", c.ClientIP)
-	req.Header.Set("X-Client-IP", c.ClientIP)
+	req.Header.Set("X-Forwarded-For", clientIP)
+	req.Header.Set("X-Real-IP", clientIP)
+	req.Header.Set("X-Client-IP", clientIP)
 }
 
 // ExtractClientIP 从入站请求提取客户端 IP 首段（X-Forwarded-For 首段，回落 X-Real-IP）。
-// 供 handler 在 PassthroughIP 开启时填充 Client.ClientIP（chat 路径出站前设置、用后清空）。
+// 供 handler 在 PassthroughIP 开启时按请求取值后传入 ChatStream（chat 路径专属，不跨请求）。
 // 取不到返回空串（handler 据此跳过透传）。
 func ExtractClientIP(r *http.Request) string {
 	if r == nil {

@@ -93,3 +93,46 @@ func TestNeedsRefresh(t *testing.T) {
 		t.Error("far future should not need refresh")
 	}
 }
+
+// TestParseDeviceToken 嵌套形与扁平形 auth 文件的顶层 device_token 键均被解析。
+func TestParseDeviceToken(t *testing.T) {
+	nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"u1"},"device_token":"dev-tok-nested"}`)
+	sa, err := Parse(nested)
+	if err != nil {
+		t.Fatalf("nested parse: %v", err)
+	}
+	if sa.DeviceToken != "dev-tok-nested" {
+		t.Errorf("nested DeviceToken = %q want %q", sa.DeviceToken, "dev-tok-nested")
+	}
+
+	flat := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u2","device_token":"dev-tok-flat"}`)
+	fa, err := Parse(flat)
+	if err != nil {
+		t.Fatalf("flat parse: %v", err)
+	}
+	if fa.DeviceToken != "dev-tok-flat" {
+		t.Errorf("flat DeviceToken = %q want %q", fa.DeviceToken, "dev-tok-flat")
+	}
+}
+
+// TestSaveAtomicPreservesDeviceToken SaveAtomic 写回后顶层 device_token 被保留并重新解析回来。
+func TestSaveAtomicPreservesDeviceToken(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-dt.json")
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1,
+		UID: "u1", DeviceToken: "persisted-tok", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if b.DeviceToken != "persisted-tok" {
+		t.Errorf("roundtrip DeviceToken = %q want %q", b.DeviceToken, "persisted-tok")
+	}
+}

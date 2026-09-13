@@ -41,6 +41,12 @@ func main() {
 		log.Fatalf("load auths: %v", err)
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
+	// 派生设备标识（C 段备用字段）：每个账号稳定派生一个 machineId（auth 文件
+	// machine_id 显式配置优先，否则 deriveID(uid)）。官方 chat 出站不显式带该头，
+	// 字段仅备用，供后续 telemetry 事件指纹引用。
+	for _, a := range auths {
+		a.EnsureMachineId()
+	}
 
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)

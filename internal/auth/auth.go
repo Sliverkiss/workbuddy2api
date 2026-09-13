@@ -3,8 +3,6 @@
 package auth
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,14 +31,6 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
-
-	// MachineId 派生设备标识（备用字段）。对齐官方 clientInfo.machineId 语义
-	// （每台机器稳定，client-info-env.js:30-103）：容器是多账号池、无真实 OS
-	// machineId，故按账号派生稳定值——auth 文件可显式配 machine_id 键
-	// （模拟「该账号绑定的机器指纹」），缺省用 deriveID(uid) 派生态（改变账号
-	// 产物不变）。官方 chat 出站不显式带 machineId 头（step1 §2.4 仅反馈/录日志
-	// 接口经 body 传参），此字段暂时只作属性备用，供后续 telemetry 事件指纹引用。
-	MachineId string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -55,31 +45,6 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 		return true
 	}
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
-}
-
-// deriveSalt 派生 machineId 的固定盐（非凭据）。只参与 sha256 哈希掐头，
-// 不落盘不传输，仅让派生值不可被 uid 直接反推。注释即文档：此串非密钥。
-const deriveSalt = "wb2api-ua-fp"
-
-// deriveID 由账号 uid 稳定派生一个 48 位 hex 设备标识。
-// 幂等：同一账号每次生成相同值，模拟官方机器级稳定指纹（client-info-env.js:30-103
-// 每台机器稳定）。与 Python fork（scripts/task_runner.py derive_id，md5(salt:uid) 截短）
-// 同款思路，此处用 sha256（Go 标准库，无 md5 弱化顾虑）。只用于派生设备标识
-// （machineId 兜底），不参与业务逻辑。
-func deriveID(uid string) string {
-	sum := sha256.Sum256([]byte(deriveSalt + ":" + uid))
-	return hex.EncodeToString(sum[:])[:48]
-}
-
-// EnsureMachineId 使 a.MachineId 非空：显式配置（auth 文件 machine_id 键）优先，
-// 为空则派生（deriveID(uid)，账号改变产物不变）。官方「机器稳定」语义 → 网关按
-// 「账号稳定」落地：同一账号始终同一派生 deviceId，不随进程重启变化。
-func (a *Auth) EnsureMachineId() string {
-	if a.MachineId != "" {
-		return a.MachineId
-	}
-	a.MachineId = deriveID(a.UID)
-	return a.MachineId
 }
 
 // Parse 兼容两种磁盘形态：
@@ -111,9 +76,6 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
-			// MachineId 顶层 machine_id（可选）：显式指定该账号的派生设备标识，
-			// 缺省在 EnsureMachineId 时按 uid 派生。同上放顶层，降低配置门槛。
-			MachineId string `json:"machine_id"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -127,7 +89,6 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
-			MachineId:    n.MachineId,
 		}
 	} else {
 		var f struct {
@@ -139,7 +100,6 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
-			MachineId    string `json:"machine_id"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -153,7 +113,6 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
-			MachineId:    f.MachineId,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -191,11 +150,6 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
-	}
-	// MachineId 显式配置才写回顶层 machine_id（派生态不落盘：由 EnsureMachineId
-	// 每次按 uid 幂等重建，避免派生值污染旧文件 / 与插件形状不一致）。
-	if a.MachineId != "" {
-		doc["machine_id"] = a.MachineId
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

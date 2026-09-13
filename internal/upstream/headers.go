@@ -157,6 +157,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string) {
 // injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
 // 仅在 chat/completions 路径生效（ChatHeaders 调用）。ClientName 非空时全量跟随该值，
 // 空则只保留 X-Product="SaaS"（旧行为，向后兼容）。
+//
+// B 段对齐官方白名单头组（application-manifest.js:27590-27601）：X-IDE-* 四头齐全且
+// 取值跟随 ClientName（X-IDE-Name/Type/Product = WorkBuddy），X-IDE-Version = 客户端
+// 版本段（config client_version 可覆盖）。与官方 banner 头组完全同形。
 func (c *Client) injectAttribution(req *http.Request) {
 	if c == nil || c.ClientName == "" {
 		req.Header.Set("X-Product", "SaaS")
@@ -165,6 +169,7 @@ func (c *Client) injectAttribution(req *http.Request) {
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", c.ClientName)
 	req.Header.Set("X-IDE-Type", c.ClientName)
+	req.Header.Set("X-IDE-Version", c.clientVersion())
 	req.Header.Set("X-Product", c.ClientName)
 }
 

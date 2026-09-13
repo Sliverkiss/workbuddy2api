@@ -58,6 +58,40 @@ func TestAgentPurposeHeadersSet(t *testing.T) {
 	}
 }
 
+// TestAttributionIncludesIDEVersion client_name + client_version 都配时，
+// X-IDE-* 四头齐全（Name/Type/Product 跟随 client_name，Version 跟随 client_version）。
+func TestAttributionIncludesIDEVersion(t *testing.T) {
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	c := &Client{ClientName: "WorkBuddy", ClientVersion: "6.0.0"}
+	h := chatHeadersReq(t, c, a, "")
+	for _, tc := range []struct {
+		header string
+		want   string
+	}{
+		{"X-Agent-Purpose", "conversation"},
+		{"X-IDE-Name", "WorkBuddy"},
+		{"X-IDE-Type", "WorkBuddy"},
+		{"X-IDE-Version", "6.0.0"},
+		{"X-Product", "WorkBuddy"},
+	} {
+		if got := h.Get(tc.header); got != tc.want {
+			t.Errorf("%s = %q want %q", tc.header, got, tc.want)
+		}
+	}
+	// X-IDE-Version 缺省（client_version 空）= 内置默认 5.5.4，且四头齐全。
+	c2 := &Client{ClientName: "WorkBuddy"}
+	h2 := chatHeadersReq(t, c2, a, "")
+	if got := h2.Get("X-IDE-Version"); got != "5.5.4" {
+		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.5.4")
+	}
+	// ClientName 空时 X-IDE-Version 不设（保持旧行为：只有 X-Product=SaaS）。
+	c3 := &Client{}
+	h3 := chatHeadersReq(t, c3, a, "")
+	if got := h3.Get("X-IDE-Version"); got != "" {
+		t.Errorf("X-IDE-Version = %q want empty (client_name unset)", got)
+	}
+}
+
 // TestProductDefaultSaaS ClientName 空（缺省）时 X-Product=SaaS 且不设 X-IDE-*（旧行为）。
 func TestProductDefaultSaaS(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}

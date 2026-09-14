@@ -172,3 +172,27 @@ func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
 		t.Errorf("cat 失败未按 WARN 记录:\n%s", out)
 	}
 }
+
+// TestPythonCmd WORKBUDDY_PYTHON 覆盖解释器名：缺省/空白回落 "python3"（保持
+// 容器与既有测试的行为不变），显式设置时取其值（Windows 等仅有 python 的环境）。
+func TestPythonCmd(t *testing.T) {
+	t.Setenv("WORKBUDDY_PYTHON", "")
+	if got := pythonCmd(); got != "python3" {
+		t.Errorf("default pythonCmd()=%q want python3", got)
+	}
+
+	t.Setenv("WORKBUDDY_PYTHON", "   ")
+	if got := pythonCmd(); got != "python3" {
+		t.Errorf("blank pythonCmd()=%q want python3", got)
+	}
+
+	t.Setenv("WORKBUDDY_PYTHON", "python")
+	if got := pythonCmd(); got != "python" {
+		t.Errorf("override pythonCmd()=%q want python", got)
+	}
+
+	t.Setenv("WORKBUDDY_PYTHON", "  /usr/bin/python3.10  ")
+	if got := pythonCmd(); got != "/usr/bin/python3.10" {
+		t.Errorf("trim pythonCmd()=%q want /usr/bin/python3.10", got)
+	}
+}

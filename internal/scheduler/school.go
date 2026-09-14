@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // repoRoot 定位仓库根（容器内 /app、宿主 /root/workbuddy2api）。
@@ -56,6 +57,22 @@ var newScriptCmd = func(program string, args ...string) scriptRunner {
 	return &scriptCmd{cmd: exec.Command(program, args...)}
 }
 
+// pythonCmd 返回执行 scripts/*.py 的解释器名。
+//
+// 默认 "python3"，与容器/Linux 现状完全一致，行为零变更；WORKBUDDY_PYTHON
+// 显式指定时优先，供解释器不叫 python3 的环境使用。
+//
+// 需要该开关的原因：Windows 官方安装器只提供 python.exe，且 PATH 上常存在
+// Microsoft Store 的 python3.exe App Execution Alias 存根——exec.Command 能找到
+// 它却无法真正执行，脚本类任务统一报 `exit status 9009`。
+// 设 WORKBUDDY_PYTHON=python 即可绕过。
+func pythonCmd() string {
+	if v := strings.TrimSpace(os.Getenv("WORKBUDDY_PYTHON")); v != "" {
+		return v
+	}
+	return "python3"
+}
+
 // runScript 依次执行若干脚本命令：任一命令失败只记一行 WARN，不向上抛、
 // 不影响调度主循环继续跑下一个时点。单命令失败不中断后续命令。
 func runScript(name, root string, commands [][]string) {
@@ -76,7 +93,7 @@ func runScript(name, root string, commands [][]string) {
 func (s *Scheduler) RunSchoolNow() {
 	root := repoRoot()
 	runScript("school", root, [][]string{
-		{"python3", "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
+		{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
 	})
 }
 
@@ -86,6 +103,6 @@ func (s *Scheduler) RunSchoolNow() {
 func (s *Scheduler) RunCatNow() {
 	root := repoRoot()
 	runScript("cat", root, [][]string{
-		{"python3", "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
+		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
 	})
 }

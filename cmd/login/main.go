@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,7 +44,11 @@ const (
 )
 
 // 登录 state 落盘路径（var 便于测试替换临时文件）
-var stateFile = "/tmp/wb2api-login-state.json"
+//
+// Portable across OSes: the upstream used a hardcoded "/tmp/..." which fails on
+// Windows ("The system cannot find the path specified"). os.TempDir() resolves
+// to the platform temp directory instead.
+var stateFile = filepath.Join(os.TempDir(), "wb2api-login-state.json")
 
 // exitFunc 供测试替换（默认 os.Exit；测试持临时替换为 panic 以进程内捕获 fatal）。
 var exitFunc = os.Exit

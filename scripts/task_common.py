@@ -63,7 +63,10 @@ def load_auth(uid_or_file: str) -> dict:
         if not hits:
             raise SystemExit(f"no auth for {pre}")
         p = hits[0]
-    d = json.load(open(p))
+    # encoding="utf-8" 必须显式指定：Windows 上 open() 默认用 locale 代码页
+    # （中文系统为 GBK），而 auth 文件是 UTF-8 写入的，非 ASCII 昵称会触发
+    # UnicodeDecodeError，使所有脚本类任务（school/cat/trial 等）直接中断。
+    d = json.load(open(p, encoding="utf-8"))
     a, acc = d["auth"], d["account"]
     realm = a.get("realm") or d.get("realm") or ""
     return {"token": a["accessToken"], "domain": a.get("domain") or "",

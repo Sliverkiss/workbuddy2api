@@ -15,6 +15,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/metrics"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
@@ -43,6 +44,9 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+
+	// Metrics 按模型的请求统计收集器（nil = 未启用，/v1/stats 返回 enabled:false）。
+	Metrics *metrics.Collector
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -89,6 +93,8 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
+	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
@@ -133,6 +139,39 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"service":        ServiceName,
 		"realm_servable": realmServable,
 	})
+}
+
+// stats 返回按模型聚合的请求统计（面板「统计」页数据源）。
+//
+// 采集点放在网关侧而不是面板：网关是所有流量（含绕过面板的客户端）的唯一必经点，
+// 只有在这里才能统计到完整调用，且不依赖面板是否在运行。
+func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Metrics == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"message": "统计未启用（server.metrics_enabled=false）",
+		})
+		return
+	}
+	snap := h.cfg.Metrics.Derived()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":    true,
+		"since":      snap.Since,
+		"now":        snap.Now,
+		"uptime_sec": snap.UptimeSec,
+		"total":      snap.Total,
+		"models":     snap.Models,
+	})
+}
+
+// statsReset 清空统计（运维手动归零，便于观察某个时间点之后的增量）。
+func (h *Handler) statsReset(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Metrics == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "统计未启用"})
+		return
+	}
+	h.cfg.Metrics.Reset()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "统计已重置"})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +418,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	st.collector = h.cfg.Metrics
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -600,6 +640,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = upstream.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
+			st.usage = stats.Usage()
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
@@ -623,6 +664,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
+		// 统计：非流式聚合响应的 usage 归一化后供采集器取明细。
+		if u, ok := resp["usage"].(map[string]any); ok {
+			st.usage = ParseUsage(u)
+		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)

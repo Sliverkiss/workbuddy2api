@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/metrics"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
@@ -171,7 +172,14 @@ func main() {
 		log.Printf("夜猫子任务已启用：%v 点（task_runner.py ALL --yes --only black_cat）", cfg.Schedule.CatHours)
 	}
 
+	var metricsCollector *metrics.Collector
+	if cfg.Server.MetricsEnabled {
+		metricsCollector = metrics.New(cfg.Server.MetricsFile)
+		defer metricsCollector.Flush() // 退出前落盘
+	}
+
 	h := server.NewHandler(server.Config{
+		Metrics:      metricsCollector,
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,

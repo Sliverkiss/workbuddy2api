@@ -26,6 +26,12 @@ type Config struct {
 		// （issue #41：截断的 JSON 让上游 unmarshal 报 unexpected EOF，网关却罚号）。
 		// 0/负数视为非法 → normalize 回落默认并记录。
 		MaxBodyMB int `json:"max_body_mb"`
+
+		// MetricsEnabled 是否采集按模型的请求统计（默认 true）。
+		MetricsEnabled bool `json:"metrics_enabled"`
+		// MetricsFile 统计持久化文件；空 = 纯内存（重启清零）。
+		// 默认 ./data/metrics.json，重启后累计值不丢。
+		MetricsFile string `json:"metrics_file"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -152,6 +158,8 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.MaxBodyMB = 8 // 请求体上限默认 8MB
+	c.Server.MetricsEnabled = true
+	c.Server.MetricsFile = "./data/metrics.json"
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
 	// 消除 issue #49 的默认值漂移）。
 	c.Schedule = config.DefaultSchedule()

@@ -276,6 +276,107 @@ func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	}
 }
 
+func TestUsageAggregatesCreditsAndSyncsPool(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		res := `{"code":0,"data":{"Response":{"Data":{"TotalDosage":9999,"Accounts":[`
+		if authz == "Bearer at1" {
+			res += `{"CapacitySize":500,"CapacityRemain":500},{"CapacitySize":100,"CapacityRemain":90}`
+		} else {
+			res += `{"CapacitySize":500,"CapacityRemain":400}`
+		}
+		res += `]}}}}`
+		return 200, res, false
+	})
+	pool := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: pool, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/usage", nil))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Total struct {
+			Remain, Size, Used int64
+			Accounts, Ok       int
+		} `json:"total"`
+		Credits []struct {
+			UID    string `json:"uid"`
+			Remain int64  `json:"remain"`
+			Ok     bool   `json:"ok"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body)
+	}
+	// u1: 500+90=590/600，u2: 400/500 —— TotalDosage 不参与（累计发放量）
+	// u2: 400/500 → 合计 remain 990 / size 1100
+	if got.Total.Remain != 990 || got.Total.Size != 1100 || got.Total.Used != 110 {
+		t.Errorf("total=%+v want remain=990 size=1100 used=110", got.Total)
+	}
+	if got.Total.Accounts != 2 || got.Total.Ok != 2 {
+		t.Errorf("accounts=%d ok=%d want 2/2", got.Total.Accounts, got.Total.Ok)
+	}
+	if len(got.Credits) != 2 || got.Credits[0].UID != "u1" || got.Credits[1].UID != "u2" {
+		t.Fatalf("credits=%+v want sorted u1,u2", got.Credits)
+	}
+	// 余额同步回池：/status 的 credits 字段与 /v1/usage 一致（下一轮签到前的唯一刷新源）。
+	for _, st := range pool.List() {
+		want := map[string]int64{"u1": 590, "u2": 400}[st.UID]
+		if st.Credits != want {
+			t.Errorf("pool credits %s=%d want %d", st.UID, st.Credits, want)
+		}
+	}
+}
+
+// 单账号上游失败时：该行 ok=false + error，整体仍 200，且池内旧余额不被覆盖成 0。
+func TestUsagePartialFailureKeepsPoolCredits(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at1" {
+			return 200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CapacitySize":500,"CapacityRemain":300}]}}}}`, false
+		}
+		return 500, `upstream boom`, false
+	})
+	pool := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: pool, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/usage", nil))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Total   struct{ Ok, Failed int } `json:"total"`
+		Credits []struct {
+			UID   string `json:"uid"`
+			Ok    bool   `json:"ok"`
+			Error string `json:"error"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Total.Ok != 1 || got.Total.Failed != 1 {
+		t.Errorf("ok=%d failed=%d want 1/1", got.Total.Ok, got.Total.Failed)
+	}
+	for _, c := range got.Credits {
+		if c.UID == "u2" && (c.Ok || c.Error == "") {
+			t.Errorf("u2 should carry ok=false + error, got %+v", c)
+		}
+	}
+	for _, st := range pool.List() {
+		if st.UID == "u2" && st.Credits != 1000 {
+			t.Errorf("failed account credits=%d want untouched 1000", st.Credits)
+		}
+	}
+}
+
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz != "Bearer at1" {

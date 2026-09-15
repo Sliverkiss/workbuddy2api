@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +91,7 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/usage", h.withAuth(h.usage))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
@@ -137,6 +139,96 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"total":          total,
 		"service":        ServiceName,
 		"realm_servable": realmServable,
+	})
+}
+
+// usage 实时查询全池积分余额（聚合 + 逐账号）。
+//
+// 不直接把 pool 里的 credits 当作余额返回：credits 只在签到路径（ReenableIfCredits）或
+// 本端点的同步回写时更新，签到关闭时会永远停在旧值，当成余额用会骗到宿主。
+// 此处逐账号实时查上游，并把结果同步回池（下轮签到前的唯一余额刷新源）。
+// 单账号查询失败只标记该行 ok=false，整体仍 200：部分可用好过整体不可用。
+func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
+	states := h.cfg.Pool.List()
+	if len(states) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"total":   map[string]any{"remain": 0, "size": 0, "used": 0, "accounts": 0, "ok": 0, "failed": 0},
+			"credits": []any{},
+		})
+		return
+	}
+
+	type creditDelta struct {
+		uid string
+		cr  upstream.CreditBalance
+	}
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		credits = make([]map[string]any, 0, len(states))
+		deltas  []creditDelta
+		remain  int64
+		size    int64
+		okCount int
+	)
+	sem := make(chan struct{}, 4) // 限并发：账号多时不要一次性打爆上游 billing
+	for _, st := range states {
+		wg.Add(1)
+		go func(st pool.Status) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			entry := map[string]any{"uid": st.UID, "nickname": st.Nickname, "ok": false}
+			a := h.cfg.Pool.AuthByUID(st.UID)
+			if a == nil {
+				entry["error"] = "no-auth"
+			} else if cr, err := h.cfg.Upstream.CreditBalance(a); err != nil {
+				entry["error"] = err.Error()
+			} else {
+				entry["ok"] = true
+				entry["remain"] = cr.Remain
+				entry["size"] = cr.Size
+				used := cr.Size - cr.Remain
+				if used < 0 {
+					used = 0
+				}
+				entry["used"] = used
+				mu.Lock()
+				remain += cr.Remain
+				size += cr.Size
+				okCount++
+				deltas = append(deltas, creditDelta{st.UID, cr})
+				mu.Unlock()
+			}
+			mu.Lock()
+			credits = append(credits, entry)
+			mu.Unlock()
+		}(st)
+	}
+	wg.Wait()
+
+	// 池内余额只写不回读：失败账号保持旧值（绝不写 0）。
+	for _, d := range deltas {
+		h.cfg.Pool.SetCredits(d.uid, d.cr.Remain)
+	}
+	sort.Slice(credits, func(i, j int) bool { return credits[i]["uid"].(string) < credits[j]["uid"].(string) })
+
+	used := size - remain
+	if used < 0 {
+		used = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total": map[string]any{
+			"remain":   remain,
+			"size":     size,
+			"used":     used,
+			"accounts": len(states),
+			"ok":       okCount,
+			"failed":   len(states) - okCount,
+		},
+		"credits": credits,
 	})
 }
 

@@ -3,8 +3,8 @@
 // 官方 CodeBuddy CLI 出站头族（X-Conversation-ID / X-Conversation-Request-ID /
 // X-Request-ID / X-B3-*），后台按 X-Conversation-Request-ID（对话轮）聚合请求；
 // 本文件提供 conversationId 提取、消息级 32 hex messageID、以及"同一会话键
-// 稳定复用"的 conversationRequestID 惰性缓存，供 handler 轮转循环外生成、循环内
-// 复用（换号/重试/降级全部同 ID → 后台不再碎片化）。
+// 稳定复用"的 conversationRequestID 纯派生（加盐），供 handler 轮转循环外生成、
+// 循环内复用（换号/重试/降级全部同 ID → 后台不再碎片化）。
 package session
 
 import (
@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
-	"sync"
 )
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
@@ -57,13 +56,14 @@ func NewMessageID() string {
 	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
 }
 
-// requestIDs 会话键（sticky key）→ conversationRequestID 的进程内惰性缓存。
-// sync.Map：并发无锁读/写，Entry 不删除（会话 key 恒定，值只增不减，不泄漏——
-// key 与粘性会话键同源，进程生命周期内数量有限）。
-var requestIDs sync.Map
+// deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法
+// 按外部可控的键内容（会话键/轮级键）被预计算；重启换新（重启时旧对话轮/会话已
+// 结束，不构成断档）。会话级（RequestIDForKey）与轮级（TurnRequestID）共用同一盐。
+var deriveSalt = NewMessageID()
 
-// RequestIDForKey 返回会话键的稳定 conversationRequestID：
-//   - 同 key：首次调用生成并缓存，此后恒返回同值（一次 user send/同会话多轮聚合）；
+// RequestIDForKey 返回会话键的稳定 conversationRequestID：sha256(盐|键) 前 16 字节
+// 的 hex，纯派生（无缓存、无 TTL、内存不随键数增长）。
+//   - 同 key：进程内恒派生同值（一次 user send/同会话多轮聚合）；
 //   - 异 key：各自独立，互不相同；
 //   - 空 key：每次生成新值（无会话则无"会话内稳定"语义——调用方应在请求级
 //     捕获复用，handler 在轮转循环外取一次即天然共享）。
@@ -73,17 +73,9 @@ func RequestIDForKey(key string) string {
 	if key == "" {
 		return NewMessageID()
 	}
-	if v, ok := requestIDs.Load(key); ok {
-		return v.(string)
-	}
-	id := NewMessageID()
-	actual, _ := requestIDs.LoadOrStore(key, id)
-	return actual.(string)
+	sum := sha256.Sum256([]byte(deriveSalt + "|" + key))
+	return hex.EncodeToString(sum[:16])
 }
-
-// turnSalt 轮级聚合键的派生盐：进程启动时随机生成，让派生 ID 无法按消息内容
-// 被外部预计算；重启换新（重启时旧对话轮已结束，不构成断档）。
-var turnSalt = NewMessageID()
 
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的
 // 「序号 + 文本」。
@@ -161,16 +153,13 @@ func contentText(raw json.RawMessage) string {
 }
 
 // TurnRequestID 返回轮级键对应的聚合 ID：sha256(盐|键) 前 16 字节的 hex（32 位，
-// 与 NewMessageID 同形态，可直接作 B3 TraceId）。
-//
-// 纯派生，无缓存、无 TTL、不随进程内请求数增长内存 —— 这点与会话级的
-// RequestIDForKey 相反：会话键数量有限（与粘性会话同源）可以常驻缓存，而轮级键
-// 每个对话轮新增一条，缓存必须有界，派生式天然有界。
+// 与 NewMessageID 同形态，可直接作 B3 TraceId）。与会话级 RequestIDForKey 共用同一
+// 派生盐（deriveSalt），两者皆纯派生、无缓存、内存有界。
 // 空键返回新随机值（无轮可聚合时保持原有的「每请求独立」行为）。
 func TurnRequestID(turnKey string) string {
 	if turnKey == "" {
 		return NewMessageID()
 	}
-	sum := sha256.Sum256([]byte(turnSalt + "|" + turnKey))
+	sum := sha256.Sum256([]byte(deriveSalt + "|" + turnKey))
 	return hex.EncodeToString(sum[:16])
 }

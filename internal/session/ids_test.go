@@ -52,9 +52,9 @@ func TestNewMessageIDFormat(t *testing.T) {
 	}
 }
 
-// TestRequestIDForKeyStability 同 key 恒稳定、异 key 各不同、空 key 每次新值。
-func TestRequestIDForKeyStability(t *testing.T) {
-	// 预热清空包级缓存，避免其他测试污染 key（测试隔离）。
+// TestRequestIDForKeyDerivation 同 key 恒稳定、异 key 各不同、空 key 每次新值
+// （纯派生实现，无包级缓存，测试间天然隔离）。
+func TestRequestIDForKeyDerivation(t *testing.T) {
 	k1a := RequestIDForKey("conv-a")
 	k1b := RequestIDForKey("conv-a")
 	if k1a != k1b {

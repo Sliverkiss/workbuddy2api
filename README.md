@@ -174,6 +174,41 @@ curl -s http://localhost:7863/v1/chat/completions \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+## Anthropic Messages 兼容接口
+
+新增 `POST /v1/messages`，可供 Claude Code 使用。仍通过原有 Chat Completions
+链路完成账号池、Token 刷新、重试、冷却、会话绑定和计费统计。
+
+- Anthropic Base URL：`http://127.0.0.1:7863`（**不带 `/v1`**）。
+- OpenAI Base URL 仍是 `http://127.0.0.1:7863/v1`。
+- 两种入口均接受 `Authorization: Bearer <api_key>` 或 `x-api-key: <api_key>`；
+  同时提供时以 Authorization 为准，Messages 错误返回 Anthropic 格式。
+- 支持文本、用户图片、system 提示词、thinking 历史、客户端工具定义及
+  `tool_use` / `tool_result` 往返、非流式和 SSE 流式响应。
+- 文本和 thinking 增量实时输出；工具参数在完成并校验 JSON 后输出。
+  截断的工具调用不会作为可执行调用返回。客户端断连沿用原有取消链路。
+- `output_config.effort` 映射到 `reasoning_effort`；具体档位由上游模型决定。
+- 模型名末尾 `[1M]` / `[1m]` 作为客户端提示移除，不代表上游支持百万上下文。
+- 不提供 `/v1/messages/count_tokens`，Claude Code 使用自身的估算回退。
+- Anthropic 内置服务端工具、PDF/document 块和结构化 `output_config.format`
+  暂不支持，返回明确 400；prompt cache 控制块不会转发，缓存使用上游机制。
+  非 Claude 模型的 thinking 签名为空，不具备 Anthropic 签名验证能力。
+
+Claude Code 示例配置（合并到现有 `~/.claude/settings.json`）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:7863",
+    "ANTHROPIC_AUTH_TOKEN": "你的网关 api_key",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "cn:deepseek-v4.1-flash"
+  },
+  "model": "sonnet"
+}
+```
+
+接口适配不会新增上游模型权限；各模型的上下文和能力仍以上游为准。
+
 ## 安全与合规
 
 ### 发布来源与合规边界

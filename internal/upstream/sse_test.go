@@ -148,6 +148,44 @@ data: [DONE]
 	}
 }
 
+// TestAggregateNonDeltaMessageMergesToolCalls RED：上游用非 delta 的完整 message
+// 下发（含 tool_calls / reasoning_content / role）时，Aggregate 的 message 回退分支
+// 只合并 content——tool_calls、reasoning_content、role 全部丢失。规约：该兜底分支
+// 应与 delta 分支同构，至少合并 tool_calls 与 role（非编造，上游给了就透）。
+func TestAggregateNonDeltaMessageMergesToolCalls(t *testing.T) {
+	raw := `data: {"id":"x1","object":"chat.completion.chunk","created":1,"model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"think think","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]}}],"usage":null}
+data: {"id":"x1","choices":[{"index":0,"message":{},"finish_reason":"tool_calls"}],"usage":{"total_tokens":11}}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Errorf("finish_reason=%v", choice["finish_reason"])
+	}
+	msg := choice["message"].(map[string]any)
+	if msg["role"] != "assistant" {
+		t.Errorf("role=%v want assistant (missed by content-only message fallback)", msg["role"])
+	}
+	if msg["reasoning_content"] != "think think" {
+		t.Errorf("reasoning_content=%v", msg["reasoning_content"])
+	}
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls=%#v (dropped by content-only message fallback)", msg["tool_calls"])
+	}
+	if calls[0]["id"] != "call_a" || calls[0]["type"] != "function" {
+		t.Errorf("call meta=%v", calls[0])
+	}
+	fn := calls[0]["function"].(map[string]any)
+	if fn["name"] != "get_weather" || fn["arguments"] != `{"city":"北京"}` {
+		t.Errorf("fn=%v", fn)
+	}
+}
+
 // TestStripToolCallNames 直测跨帧 name 收敛：首片保留 name、同 index 后续分片删除
 // name 键（空串或重复非空串都删），不同 index 互不串扰，非 tool_calls 帧零影响。
 func TestStripToolCallNames(t *testing.T) {

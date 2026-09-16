@@ -186,6 +186,48 @@ data: [DONE]
 	}
 }
 
+// TestAggregateEOFDropsTruncatedToolCalls RED：上游流被掐断（EOF 收尾、无 [DONE]、
+// 无 finish_reason）时，tool_calls 的 arguments 是残缺 JSON。规约：截断来源
+// 除 finish_reason=="length" 外还包括连接中断（sawDone=false）——残缺调用必须
+// 丢弃，否则客户端解析非法 JSON 卡死会话；正常 [DONE] 收尾的完整调用不受影响。
+func TestAggregateEOFDropsTruncatedToolCalls(t *testing.T) {
+	raw := `data: {"id":"x1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\"cmd\":"},"index":0}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"ls\""},"index":0}]}}]}` // EOF 截断，无 DONE
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("EOF-truncated stream must still aggregate: %v", err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	if calls, ok := msg["tool_calls"].([]map[string]any); ok && len(calls) != 0 {
+		t.Fatalf("truncated tool_calls must be dropped: %#v", msg["tool_calls"])
+	}
+}
+
+// TestAggregateDoneKeepsCompleteToolCall 回归：正常 [DONE] 收尾的完整 tool_calls
+// 不被 dropTruncatedToolCalls 误伤（对照 EOF 分支，sawDone 不应触发丢弃）。
+func TestAggregateDoneKeepsCompleteToolCall(t *testing.T) {
+	raw := `data: {"id":"x1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"},"index":0}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice := resp["choices"].([]any)[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("complete tool_calls must be kept: %#v", msg["tool_calls"])
+	}
+	fn := calls[0]["function"].(map[string]any)
+	if fn["arguments"] != `{"city":"北京"}` {
+		t.Errorf("args=%v", fn["arguments"])
+	}
+}
+
 // TestStripToolCallNames 直测跨帧 name 收敛：首片保留 name、同 index 后续分片删除
 // name 键（空串或重复非空串都删），不同 index 互不串扰，非 tool_calls 帧零影响。
 func TestStripToolCallNames(t *testing.T) {

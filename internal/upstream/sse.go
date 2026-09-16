@@ -27,6 +27,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		usage         map[string]any
 		gotAnyContent bool
 		validEvents   int
+		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 	)
@@ -81,6 +82,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			payload := strings.TrimPrefix(line, "data: ")
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
+				sawDone = true
 				break
 			} else {
 				var chunk map[string]any
@@ -163,12 +165,15 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		for _, idx := range toolOrder {
 			calls = append(calls, toolCalls[idx])
 		}
-		// P1b：finish_reason==length 且 tool_call 的 arguments 是残缺 JSON（解析失败）
-		// 时不把脏参数交给客户端——残留分片会被客户端解析成非法 JSON 卡死会话。
-		// 完整参数原样保留（正例零改动）；空参数（无参工具）不是截断，同样保留。
-		if finishReason == "length" {
-			calls = dropTruncatedToolCalls(calls)
-		}
+		// P1b：流被截断时 tool_call 的 arguments 是残缺 JSON（解析失败），不把脏参数
+// 交给客户端——残留分片会被客户端解析成非法 JSON 卡死会话。截断的两个来源：
+//   - finish_reason=="length"（模型因 max_tokens 提前中止）；
+//   - 上游连接中断（EOF 收尾但未发 data: [DONE]，sawDone=false）。
+// 完整参数原样保留（正例零改动）；空参数（无参工具）不是截断，同样保留。
+// 此前只认 finish_reason=="length"，EOF 截断的 tool_calls 残缺参数被原样下发。
+if finishReason == "length" || !sawDone {
+	calls = dropTruncatedToolCalls(calls)
+}
 		if len(calls) > 0 {
 			message["tool_calls"] = calls
 		}
@@ -191,6 +196,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	}
 	return resp, nil
 }
+
+// mergeToolCallDelta 把流式 tool_call 片段合并到累计对象：
 
 // mergeToolCallDelta 把流式 tool_call 片段合并到累计对象：
 // id/type/function.name 直覆盖（后续分片通常缺省），function.arguments 拼接。

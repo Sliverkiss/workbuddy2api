@@ -192,9 +192,47 @@ if finishReason == "length" || !sawDone {
 		},
 	}
 	if usage != nil {
-		resp["usage"] = usage
+		// OpenAI 非流式 usage 必含 total_tokens。上游若只发 prompt_tokens +
+		// completion_tokens（部分上游末帧缺 total），网关合成补齐——否则严格按
+		// schema 校验的客户端收不到 total_tokens。已有 total 或二者缺一不补
+		// （不臆造：单边有值无法合成可信的 total）。
+		resp["usage"] = ensureUsageTotal(usage)
 	}
 	return resp, nil
+}
+
+// ensureUsageTotal 在 usage 缺 total_tokens 但 prompt_tokens/completion_tokens 都在时
+// 补齐 total = prompt + completion（通过新 map 合并，不修改原上游 map）。
+// 任一缺失或已有 total 时原样返回。
+func ensureUsageTotal(u map[string]any) map[string]any {
+	if _, ok := u["total_tokens"]; ok {
+		return u
+	}
+	pt, pok := num64(u["prompt_tokens"])
+	ct, cok := num64(u["completion_tokens"])
+	if !pok || !cok {
+		return u
+	}
+	out := make(map[string]any, len(u)+1)
+	for k, v := range u {
+		out[k] = v
+	}
+	out["total_tokens"] = pt + ct
+	return out
+}
+
+// num64 把 JSON number（float64/int64 均可）归一为 float64；非数字返回 ok=false。
+func num64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int64:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	default:
+		return 0, false
+	}
 }
 
 // mergeToolCallDelta 把流式 tool_call 片段合并到累计对象：

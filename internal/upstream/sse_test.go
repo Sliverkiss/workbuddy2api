@@ -228,6 +228,41 @@ data: [DONE]
 	}
 }
 
+// TestEnsureUsageTotalSynthesizesMissingTotal RED：上游末帧 usage 缺 total_tokens
+// 但 prompt_tokens/completion_tokens 都在时，非流式聚合必须补齐 total（OpenAI
+// 非流式 usage 必含该字段）。已有 total / 缺单边 / 无 usage 三形态保持原样。
+func TestEnsureUsageTotalSynthesizesMissingTotal(t *testing.T) {
+	// 缺 total：补齐
+	syn := ensureUsageTotal(map[string]any{"prompt_tokens": float64(10), "completion_tokens": float64(5)})
+	if syn["total_tokens"] != float64(15) {
+		t.Errorf("synthesized total=%v want 15", syn["total_tokens"])
+	}
+	// 已有 total：不覆盖
+	keep := ensureUsageTotal(map[string]any{"prompt_tokens": float64(10), "completion_tokens": float64(5), "total_tokens": float64(100)})
+	if keep["total_tokens"] != float64(100) {
+		t.Errorf("existing total must not be overridden: %v", keep["total_tokens"])
+	}
+	// 缺单边：不合成
+	half := ensureUsageTotal(map[string]any{"prompt_tokens": float64(10)})
+	if _, ok := half["total_tokens"]; ok {
+		t.Errorf("must not synthesize with only one side present: %v", half)
+	}
+	// 集成：SSE 末帧 usage 缺 total → 聚合响应含补齐的 total
+	raw := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}
+data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := resp["usage"].(map[string]any)
+	if u["total_tokens"] != float64(15) {
+		t.Errorf("aggregated usage total=%v want 15 (integration)", u["total_tokens"])
+	}
+}
+
 // TestStripToolCallNames 直测跨帧 name 收敛：首片保留 name、同 index 后续分片删除
 // name 键（空串或重复非空串都删），不同 index 互不串扰，非 tool_calls 帧零影响。
 func TestStripToolCallNames(t *testing.T) {

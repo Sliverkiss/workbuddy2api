@@ -4,6 +4,7 @@ package upstream
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,17 @@ import (
 	"strings"
 	"time"
 )
+
+// errEmptyStream 上游返回 200 但没有有效 SSE 数据帧（空流/只有注释/[DONE]）。
+// 用哨兵错误替代裸 fmt.Errorf：StreamHint 的调用方（handler 流式路径）需要区分
+// 「上游空流」与「客户端断连写失败」——空流是上游缺陷，应记 502 观测；写失败是
+// 客户端已走，日志口径不同。Aggregate 与 StreamHint 共用同一哨兵（errors.Is 判定）。
+var errEmptyStream = errors.New("upstream stream contained no valid data events")
+
+// IsEmptyStreamError 报告错误是否为「上游空流」（无有效 SSE 帧）——供 handler
+// 在流式路径把空流记为失败观测（HTTP 头已发出只能 200，但日志/状态应收敛到
+// upstream_parse 同语义），与客户端断连类错误区分。
+func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -144,7 +156,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	if validEvents == 0 {
 		// 上游返回 200 但没有任何有效数据事件（空流/只有 [DONE]/只有注释行）：
 		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
-		return nil, fmt.Errorf("upstream stream contained no valid data events")
+		return nil, errEmptyStream
 	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
@@ -537,7 +549,7 @@ readLoop:
 		fl.Flush()
 	}
 	if validFrames == 0 {
-		return fmt.Errorf("upstream stream contained no valid data events")
+		return errEmptyStream
 	}
 	return nil
 }

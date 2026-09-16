@@ -198,10 +198,10 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", http.StatusOK, 1234)
+		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", "dev-zhang", http.StatusOK, 1234)
 	})
 	for _, want := range []string{
-		"| #", "deepseek-v4", "| stream |", "| 200 |", "uid=00e26541", "TTFB=412ms", "tok=1234", "tok/s |", "total=",
+		"| #", "deepseek-v4-flash", "| stream |", "| 200 |", "acct=dev-zhang(00e26541)", "TTFB=412ms", "tok=1234", "tok/s |", "total=",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("row missing %q:\n%s", want, out)
@@ -212,10 +212,48 @@ func TestLogChatRowFormat(t *testing.T) {
 	}
 }
 
+// TestLogChatRowModelNotTruncated 回归（issue #135）：模型名不做 11 字节硬截断。
+// 此前 cn:deepseek-v4.1-flash 被截成 cn:deepseek，与 cn:deepseek-v4-flash 无法区分；
+// global: 前缀 26 字节同样不再丢失。日志是排障用途，宽一列远优于读到错误模型名。
+func TestLogChatRowModelNotTruncated(t *testing.T) {
+	withChatLog(t)
+	models := []string{
+		"cn:deepseek-v4.1-flash",
+		"cn:deepseek-v4-flash",
+		"global:deepseek-v4.1-flash",
+		"cn:glm-5.3-flash",
+	}
+	for _, m := range models {
+		out := captureStdout(t, func() {
+			logChatRow(0, time.Second, m, "stream", "u1", "", http.StatusOK, 1)
+		})
+		if !strings.Contains(out, m) {
+			t.Errorf("model %q was truncated:\n%s", m, out)
+		}
+	}
+}
+
+// TestAccountLabel 账号标识列形态：昵称(uid8)、空昵称仅 uid8、空 uid 显示 "-"。
+func TestAccountLabel(t *testing.T) {
+	cases := []struct {
+		nick, uid, want string
+	}{
+		{"dev-zhang", "00e26541abcdef", "dev-zhang(00e26541)"},
+		{"", "00e26541abcdef", "00e26541"},
+		{"dev", "abc", "dev(abc)"},
+		{"", "", "-"},
+	}
+	for _, c := range cases {
+		if got := accountLabel(c.nick, c.uid); got != c.want {
+			t.Errorf("accountLabel(%q,%q)=%q want %q", c.nick, c.uid, got, c.want)
+		}
+	}
+}
+
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", http.StatusServiceUnavailable, -1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "-tok/s", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -227,8 +265,8 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 func TestLogChatRowSeqIncrements(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 {
@@ -261,7 +299,7 @@ func TestChatLogsStreamRow(t *testing.T) {
 			t.Fatalf("code=%d", rec.Code)
 		}
 	})
-	for _, want := range []string{"| stream |", "| 200 |", "uid=u1", "TTFB=", "tok=1"} {
+	for _, want := range []string{"| stream |", "| 200 |", "acct=u1", "TTFB=", "tok=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stream row missing %q:\n%s", want, out)
 		}
@@ -345,7 +383,7 @@ func TestChatLogsErrorRow(t *testing.T) {
 			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 		}
 	})
-	for _, want := range []string{"uid=u1", "| 503 |", "tok=-"} {
+	for _, want := range []string{"acct=u1", "| 503 |", "tok=-"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("error row missing %q:\n%s", want, out)
 		}

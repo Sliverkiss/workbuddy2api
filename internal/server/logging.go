@@ -21,12 +21,13 @@ var chatLogEnabled = true
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start  time.Time
-	model  string
-	mode   string // "stream" | "sync"
-	uid    string // 完整 uid，展示时只取前 8 位
-	ttfb   time.Duration
-	toks   int // <0 表示 usage 缺失 → 显示 "-"
+	start time.Time
+	model string
+	mode  string // "stream" | "sync"
+	uid   string // 完整 uid，展示时只取前 8 位
+	nick  string // 账号昵称（auths 登录时落盘），展示为 昵称(uid8)；空则仅 uid8
+	ttfb  time.Duration
+	toks  int // <0 表示 usage 缺失 → 显示 "-"
 	status int
 
 	logged bool
@@ -47,7 +48,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks)
+	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -187,16 +188,30 @@ func uidPrefix(uid string) string {
 	return uid
 }
 
+// accountLabel 组装账号标识列：昵称(uid8)，昵称为空时仅 uid8（issue #135：
+// 流水行需一眼看出是哪个账号，昵称来自 auths 登录时落盘，无需新增采集）。
+// 昵称按列宽安全截断（rune 感知，避免切成无效 UTF-8）；uid 为空显示 "-"。
+func accountLabel(nick, uid string) string {
+	if uid == "" {
+		return "-"
+	}
+	u8 := uidPrefix(uid)
+	if nick == "" {
+		return u8
+	}
+	return nick + "(" + u8 + ")"
+}
+
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
+// model 不做硬截断（issue #135：11 字节截断让不同模型显示成同一串、global: 前缀
+// 丢失——日志是排障用途，宽一列的成本远低于读到错误模型名）；账号列用 accountLabel
+// 展示昵称(uid8)（uid8 保留与既有日志/state.json 排查习惯对齐、可 grep）。
 // toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
+func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
 	if !chatLogEnabled {
 		return
 	}
 	seq := chatSeq.Add(1)
-	if len(model) > 11 {
-		model = model[:11]
-	}
 	tokField := "-"
 	tokpsField := "-"
 	if toks >= 0 {
@@ -211,13 +226,13 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | uid=%s | TTFB=%s | tok=%s | %stok/s | total=%.1fs |\n",
+	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | acct=%s | TTFB=%s | tok=%s | %stok/s | total=%.1fs |\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
 		mode,
 		status,
-		uidPrefix(uid),
+		accountLabel(nick, uid),
 		ttfbMS,
 		tokField,
 		tokpsField,

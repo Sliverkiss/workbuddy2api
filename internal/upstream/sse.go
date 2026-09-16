@@ -42,25 +42,68 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
+		// toolSeq 缺 index 的 tool_call 的分配序号源：跨帧延续「最近分配」槽位，
+		// 同帧内递增（见 mergeToolCallsChunk 注释）。
+		toolSeq int
+		// idIndex id → 已分配的 index：跨帧持续（延续碎片的 id 常出现在后续帧），
+		// 供缺 index 时按 id 归位既有调用（见 mergeToolCallsChunk 注释）。
+		idIndex = map[string]int{}
 	)
 	// mergeToolCallsChunk 把一段 tool_calls 数组按 index 合并进累计表。
 	// delta（流式分片，按 index 累积）与 message（非 delta 整条）共用同一合并逻辑，
 	// 保证「上游给的身份/函数名不丢、arguments 拼接语义一致」。
+	//
+	// index 缺失兼容：OpenAI 规范要求 delta 帧的 tool_call 带 index（标记分片归属），
+	// 但部分上游省略它。此前缺 index 一律归 0——多调用场景下不同 call 被合并进同一
+	// index 槽，arguments 串联、name 互相覆盖（数据污染）。修法按「id 优先、lastIdx 兜底」：
+	//   - 带 index → 按 index 累积（合规形态，零改动）；
+	//   - 缺 index 带 id 且 id 已见过 → 延续该 id 所在 index；
+	//   - 缺 index 带 id 且 id 是新的 → 开新序号（多调用不合并）；
+	//   - 缺 index 无 id → 追加到最近收到碎片的 index（单个调用的延续分片无 id
+	//     是标准形态），无既往则开新号。
+	// 带 index 的碎片照常按 index 累积，不受影响。
+	// nextToolIndex 分配下一个不冲突的缺 index 序号：从 toolSeq 起递增跳过既有
+	// index（合规流的 index 是 0..N-1，缺 index 的补位不能覆盖它们）。
+	nextToolIndex := func() int {
+		for {
+			idx := toolSeq
+			toolSeq++
+			if _, used := toolCalls[idx]; !used {
+				return idx
+			}
+		}
+	}
 	mergeToolCallsChunk := func(tcs []any) {
 		for _, tc := range tcs {
 			call, ok := tc.(map[string]any)
 			if !ok {
 				continue
 			}
-			idx := 0
+			idx := -1
 			if v, ok := call["index"].(float64); ok {
 				idx = int(v)
+			} else if cid, _ := call["id"].(string); cid != "" {
+				if mid, seen := idIndex[cid]; seen {
+					idx = mid // 该 id 已归位过：延续既有调用（跨帧有效）
+				} else {
+					idx = nextToolIndex()
+				}
+			} else if len(toolOrder) > 0 {
+				idx = toolOrder[len(toolOrder)-1] // 无 id 碎片：延续最近调用
+			} else {
+				idx = nextToolIndex()
 			}
 			merged, seen := toolCalls[idx]
 			if !seen {
 				merged = map[string]any{"index": idx}
 				toolCalls[idx] = merged
 				toolOrder = append(toolOrder, idx)
+			}
+			if cid, _ := call["id"].(string); cid != "" {
+				idIndex[cid] = idx
+			}
+			if cid, _ := merged["id"].(string); cid != "" {
+				idIndex[cid] = idx
 			}
 			mergeToolCallDelta(merged, call)
 		}

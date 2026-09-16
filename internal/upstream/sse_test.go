@@ -263,6 +263,95 @@ data: [DONE]
 	}
 }
 
+// TestAggregateToolCallsNoIndexNotCollapsed RED：上游省略 tool_call 的 index
+// （规范要求但部分上游省略）时，不同调用不得被合并进同一 index 槽——此前缺 index
+// 一律归 0，多调用被合并、arguments 串联污染、name 互相覆盖。规约：同帧缺 index
+// 按到达顺序分配递增序号，后续帧缺 index 延续最近槽位（单调用延续形态）。
+func TestAggregateToolCallsNoIndexNotCollapsed(t *testing.T) {
+	raw := `data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"f1","arguments":"{\"a\":1}"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"f2","arguments":"{\"b\":2}"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 2 {
+		t.Fatalf("two distinct tool_calls must not collapse: %#v", msg["tool_calls"])
+	}
+	// 两个 call 各自独立：arguments 不串联、name 不被覆盖。
+	argSets := map[string]bool{}
+	names := map[string]bool{}
+	for _, c := range calls {
+		fn := c["function"].(map[string]any)
+		argSets[fn["arguments"].(string)] = true
+		names[fn["name"].(string)] = true
+	}
+	if !argSets[`{"a":1}`] || !argSets[`{"b":2}`] {
+		t.Errorf("arguments must stay separate, got %v", argSets)
+	}
+	if !names["f1"] || !names["f2"] {
+		t.Errorf("names must stay separate, got %v", names)
+	}
+}
+
+// TestAggregateToolCallsMixedIndexAbsent 混合形态：全流共用一个 index-0 的合规 call，
+// 中途混入一个缺 index 的新 call——缺 index 的补位不得覆盖既有 index-0 槽
+// （nextToolIndex 从 toolSeq 递增跳过既有 index）。
+func TestAggregateToolCallsMixedIndexAbsent(t *testing.T) {
+	raw := `data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"f1","arguments":"{\"a\":1}"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"f2","arguments":"{\"b\":2}"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 2 {
+		t.Fatalf("mixed index forms must produce 2 calls: %#v", msg["tool_calls"])
+	}
+	// 两个调用 index 互异（新分配的补位序号 ≠ 既有 0）。
+	seen := map[int]bool{}
+	for _, c := range calls {
+		seen[c["index"].(int)] = true
+	}
+	if len(seen) != 2 || !seen[0] {
+		t.Errorf("indexes=%v want two distinct incl. 0", seen)
+	}
+}
+
+// TestAggregateToolCallsIdCarriedAcrossFrames 上游缺 index 但每帧都带同 id 的
+// 延续形态：call_a 的碎片跨两帧（id 都带）必须归位到同一调用，不因跨帧拆分。
+func TestAggregateToolCallsIdCarriedAcrossFrames(t *testing.T) {
+	raw := `data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"f1","arguments":"{\"a\":"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"1}"}}]}}]}
+data: {"id":"x1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+
+`
+	resp, err := Aggregate(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("same-id continuation across frames must stay one call: %#v", msg["tool_calls"])
+	}
+	fn := calls[0]["function"].(map[string]any)
+	if fn["arguments"] != `{"a":1}` {
+		t.Errorf("arguments=%q want {\"a\":1}", fn["arguments"])
+	}
+}
+
 // TestStripToolCallNames 直测跨帧 name 收敛：首片保留 name、同 index 后续分片删除
 // name 键（空串或重复非空串都删），不同 index 互不串扰，非 tool_calls 帧零影响。
 func TestStripToolCallNames(t *testing.T) {

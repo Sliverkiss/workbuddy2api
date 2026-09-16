@@ -41,6 +41,14 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		return src
 	}
 	obj["stream"] = true
+	// WorkBuddy CN 识别 max_tokens；部分 OpenAI 客户端发送 max_completion_tokens。
+	// 显式 max_tokens 优先，避免上游忽略别名后回落到默认输出上限。
+	if _, hasMaxTokens := obj["max_tokens"]; !hasMaxTokens {
+		if v, ok := obj["max_completion_tokens"]; ok {
+			obj["max_tokens"] = v
+		}
+	}
+	delete(obj, "max_completion_tokens")
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
 	if _, has := obj["stream_options"]; !has {

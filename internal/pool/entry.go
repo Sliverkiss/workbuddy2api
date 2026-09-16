@@ -480,8 +480,9 @@ const sessionDeadThreshold = 3
 //   - defaultDegradeCooldown=10m：出池时长。取软冷却封顶（2h）与熔断基数（30m）
 //     之间：长于单次软冷却（60s 级），短于熔断基数——连败的证据强度低于熔断，
 //     惩罚不应重于熔断。
-//   - defaultDegradeCooldownMax=2h：指数退避封顶，对齐 defaultSoftRateMax（同一
-//     「不知道何时恢复」的退避族）。
+//   - defaultDegradeCooldownMax=2h：降权时长的**上限钳制**（非指数退避封顶——
+//     连败降权为固定时长，见 degrade.go 注释「不做指数升级」），对齐
+//     defaultSoftRateMax 的量级。仅当显式配置的 degrade_cooldown 大于该值时钳制。
 const (
 	defaultDegradeThreshold   = 5
 	defaultDegradeCooldown    = 10 * time.Minute

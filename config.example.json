@@ -31,7 +31,7 @@
   },
   "upstream": {
     "timeout_seconds": 120,
-    "header_timeout_seconds": 60,
+    "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
     "user_agent": "",
     "client_version": "",

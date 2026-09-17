@@ -111,12 +111,14 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	// mergeMessageFields 把非 delta 的完整 message 内容并入聚合（message 是整条下发，
 	// 非流式拼接，content 只取一次）。role/reasoning_content/tool_calls 与 delta 分支
 	// 同构透出；content 同样置 gotAnyContent，与 delta 路径的 latch 语义一致
-	// （一帧整条 message 之后，后续 delta 帧不重复追加）。
+	// （一帧整条 message 之后，后续 delta 帧不重复追加）。空 content 不置位：
+	// 空 content 帧只透出 role/reasoning_content/tool_calls，不吞掉 latch，
+	// 否则后续真正带正文的 message 帧被 `!gotAnyContent` 守卫拒掉（issue #142）。
 	mergeMessageFields := func(msg map[string]any) {
 		if r2, ok := msg["role"].(string); ok && r2 != "" {
 			role = r2
 		}
-		if txt, ok := msg["content"].(string); ok {
+		if txt, ok := msg["content"].(string); ok && txt != "" {
 			content.WriteString(txt)
 			gotAnyContent = true
 		}

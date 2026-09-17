@@ -116,7 +116,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		if r2, ok := msg["role"].(string); ok && r2 != "" {
 			role = r2
 		}
-		if txt, ok := msg["content"].(string); ok {
+		// 仅非空正文才 latch：空 content 帧（role/元信息先行的常见形态）不携带正文，
+		// 若它也置 gotAnyContent，紧随其后的真正文帧会被 `!gotAnyContent` 守卫挡掉，
+		// 整条回复静默变空（空串不代表「已取到正文」）。
+		if txt, ok := msg["content"].(string); ok && txt != "" {
 			content.WriteString(txt)
 			gotAnyContent = true
 		}
@@ -169,7 +172,10 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
 									role = r2
 								}
-								if txt, ok := delta["content"].(string); ok {
+								// 同上：空 content 的 delta 帧不 latch，否则会挡掉后续整条
+								// message 帧的正文（delta 路径本就逐帧追加，latch 只影响
+								// message 回退分支是否还允许采正文）。
+								if txt, ok := delta["content"].(string); ok && txt != "" {
 									content.WriteString(txt)
 									gotAnyContent = true
 								}

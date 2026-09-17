@@ -1,0 +1,68 @@
+# test.yml 质量闸：Go 编译/vet/竞态测试 + ai-governance 的 jest/eslint。
+#
+# 背景：仓库已有 114 个 Go 测试文件（约 2.96 万行）与 .github/actions/ai-governance
+# 下 6 个 jest 套件（833 行），但此前**没有任何 workflow 执行它们**：
+#   - build.yml 只在 schedule/tag 上做 Docker 打包，不跑测试；
+#   - ai-governance.yml 只把 action 当 action 调用，不跑它自带的 tests/。
+# 结果是 PR 与推送都不会被自动验证，回归只能靠人工跑 go test——本 workflow 补上这一环。
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go（vet + 竞态测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 先编译全部包与测试二进制：编译失败要最快报出来（比 vet/测试更早、信息更短）。
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -race 是重点：本仓库多处并发路径（pool 选号/冷却、session 粘性路由、
+      # redisstore 异步写、upstream 头构造与 token 刷新）靠竞态检测兜底。
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  ai-governance:
+    name: ai-governance（jest + eslint）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/ai-governance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .github/actions/ai-governance/package-lock.json
+
+      # npm ci 需要 lockfile 与 package.json 严格一致；不一致会明确报错而不是静默装错版本。
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npx eslint src/**/*.js
+
+      - name: Test
+        run: npx jest

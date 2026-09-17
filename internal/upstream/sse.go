@@ -98,10 +98,17 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 									}
 								}
 							}
-							// 有的上游把完整消息放在 message 里（非 delta）
+							// 有的上游把完整消息放在 message 里（非 delta）。
+							// 取到正文即以「已有正文」置位：该形态携带的是**完整消息**，
+							// 同一份消息在多个数据帧里重复下发时不能累加——守卫
+							// `!gotAnyContent` 此前只读不写（只有 delta.content 会置位），
+							// 多帧同内容时守卫失效、正文被重复拼接（客户端看到内容翻倍）。
+							// 置位后与 delta 共用同一语义：delta 已在时本分支照旧被跳过。
+							// 仅在确实取到非空正文时置位：先来一帧空 content 不致丢掉后一帧的真正文。
 							if msg, ok := c["message"].(map[string]any); ok && !gotAnyContent {
-								if txt, ok := msg["content"].(string); ok {
+								if txt, ok := msg["content"].(string); ok && txt != "" {
 									content.WriteString(txt)
+									gotAnyContent = true
 								}
 							}
 						}

@@ -49,6 +49,25 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 供缺 index 时按 id 归位既有调用（见 mergeToolCallsChunk 注释）。
 		idIndex = map[string]int{}
 	)
+	// appendContent 追加正文并维护「已取到正文」不变量——本不变量只在这一处写入。
+	//
+	// 为什么收成唯一写入点：正文有两条来源（delta 逐帧分片、非 delta 整条 message），
+	// 两条都要同时满足两个不变量：
+	//   1. 空串不算「取到正文」——首帧只带 role/元信息、content 为空是流式常见形态，
+	//      若空串也置位，紧随其后的真正文帧会被 message 回退分支的 `!gotAnyContent`
+	//      守卫挡掉，整条回复静默变空（不报错，比重复追加更严重）；
+	//   2. 取到非空正文即置位——非 delta 的 message 携带的是**完整消息**，多帧重复
+	//      下发时不能逐帧累加，置位后守卫 latch，正文恰好一份。
+	// 分散在两处手写这两条会漂移：历史上前者只在 delta 路径置位（message 分支只写
+	// 未置位 → N 帧 N 遍），后者两处都对空串置位（首帧空 content 吞掉正文）。
+	appendContent := func(txt string) {
+		if txt == "" {
+			return
+		}
+		content.WriteString(txt)
+		gotAnyContent = true
+	}
+
 	// mergeToolCallsChunk 把一段 tool_calls 数组按 index 合并进累计表。
 	// delta（流式分片，按 index 累积）与 message（非 delta 整条）共用同一合并逻辑，
 	// 保证「上游给的身份/函数名不丢、arguments 拼接语义一致」。
@@ -117,8 +136,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			role = r2
 		}
 		if txt, ok := msg["content"].(string); ok {
-			content.WriteString(txt)
-			gotAnyContent = true
+			appendContent(txt)
 		}
 		if rc, ok := msg["reasoning_content"].(string); ok {
 			reasoning.WriteString(rc)
@@ -170,8 +188,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 									role = r2
 								}
 								if txt, ok := delta["content"].(string); ok {
-									content.WriteString(txt)
-									gotAnyContent = true
+									appendContent(txt)
 								}
 								if rc, ok := delta["reasoning_content"].(string); ok {
 									reasoning.WriteString(rc)

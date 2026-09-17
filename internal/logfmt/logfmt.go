@@ -20,6 +20,13 @@ import (
 // 一致），切点落在多字节字符中间时回退到 UTF-8 rune 边界——错误 body 多为中文
 // （"将在 … 重置"），按字节切会出半截序列乱码。短于 n 原样返回；n<=0 返回空串。
 func Truncate(s string, n int) string {
+	// n<=0 先返回空串：负数若走到下方 len(s) > n（对负数恒成立）再 s[:n] 会 panic
+	// （slice bounds out of range [:-1]），与本函数文档承诺的「n<=0 返回空串」相悖，
+	// 也与同文件 Pad 的 width<=0 守卫口径一致。包注释声明本包 helper 的目的正是
+	// 「防越界」，故此处不留这道缺口——调用点一旦传计算得来的 n 即成崩溃路径。
+	if n <= 0 {
+		return ""
+	}
 	s = strings.TrimSpace(s)
 	if len(s) > n {
 		// s[n] 是切点后的首字节：是 rune 的后续字节（continuation）说明切点落在

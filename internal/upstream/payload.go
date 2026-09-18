@@ -87,6 +87,14 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 			sanitizeMessages(msgs)
 		}
 	}
+	// WAF 中和（issue #119，见 waf.go）：独立于 sanitize 开关的「让请求通过」安全网
+	// （与上面 tool 配对同级——SanitizeFingerprints 关掉也照跑），始终生效、无 kill-switch。
+	// 放在指纹脱敏之后：先按逐字精确匹配剥内容
+	// 审核指纹，再插零宽空格，避免 ZWSP 破坏 sanitizeText 的精确匹配。必须在最终
+	// json.Marshal 之前作用于出站副本（原始 src 不动，会话指纹不受影响）。
+	if msgs, ok := obj["messages"].([]any); ok {
+		wafNeutralizeMessages(msgs)
+	}
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src

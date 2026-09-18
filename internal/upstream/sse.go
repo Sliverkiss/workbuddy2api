@@ -49,6 +49,8 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 供缺 index 时按 id 归位既有调用（见 mergeToolCallsChunk 注释）。
 		idIndex = map[string]int{}
 	)
+	// 入站对称剥离（始终生效，与出站 wafNeutralize 成对）：正文/推理/tool_calls arguments
+	// 出口统一剥掉上游回显的 wafBreak（ZWSP），保证聚合响应里的代码能干净落盘（见 waf.go）。
 	// appendContent 是「已取到正文」（gotAnyContent latch）的唯一写入点：delta 与
 	// message 两路 content 都必须经此并入，规约只有一份（issue #142）——
 	//   S1 空串不算「已取到正文」、不占 latch 名额：OpenAI 风格 role-only 首帧
@@ -218,18 +220,27 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 	if created == 0 {
 		created = float64(time.Now().Unix())
 	}
+	msgContent := content.String()
+	msgReasoning := reasoning.String()
+	// 入站对称剥离：整流聚合后一次性剥掉上游回显的 wafBreak（ZWSP），
+	// 覆盖跨帧碎片拼接的任何情形（见 waf.go）。
+	msgContent = wafStripBreaks(msgContent)
+	msgReasoning = wafStripBreaks(msgReasoning)
 	message := map[string]any{
 		"role":    role,
-		"content": content.String(),
+		"content": msgContent,
 	}
 	if reasoning.Len() > 0 {
-		message["reasoning_content"] = reasoning.String()
+		message["reasoning_content"] = msgReasoning
 	}
 	if len(toolOrder) > 0 {
 		sort.Ints(toolOrder)
 		calls := make([]map[string]any, 0, len(toolOrder))
 		for _, idx := range toolOrder {
-			calls = append(calls, toolCalls[idx])
+			call := toolCalls[idx]
+			// tool_calls.arguments 是编辑类工具写回文件的源码正文，入站剥离主污染面。
+			wafStripToolCallBreaks(call)
+			calls = append(calls, call)
 		}
 		// P1b：流被截断时 tool_call 的 arguments 是残缺 JSON（解析失败），不把脏参数
 		// 交给客户端——残留分片会被客户端解析成非法 JSON 卡死会话。截断的两个来源：
@@ -489,6 +500,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
 	toolCallSeen := map[int]bool{}
 
+	// 入站对称剥离始终生效（与出站 wafNeutralize 成对，见 waf.go wafStripFrameBreaks）。
+
 	// firstID 透传流的消息级 id 基准：缓存首个非空上游 id，后续帧缺失/空串时复用
 	// （issue #35：同一条 SSE 消息所有帧共用一个真实 id，后台按 id 归并；此前中间帧
 	// 一律补 chatcmpl-wb2api 哨兵，造成同流 id 分裂）。全流无真实 id → 才出现哨兵。
@@ -528,6 +541,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 				}
 				return 1, nil
 			}
+			// 入站对称剥离：上游回显的 wafBreak（ZWSP）在此逐帧剥掉，防止被客户端
+			// 写回文件时污染源码（与出站中和成对，见 waf.go）。error 帧已在上分支
+			// 原样透出、不到这里，故只作用于正常数据帧。
+			wafStripFrameBreaks(obj)
 			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 			stripToolCallNames(obj, toolCallSeen)
 			// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，

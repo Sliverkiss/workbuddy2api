@@ -12,6 +12,10 @@ data/
 /credit
 /wb2api
 /signin_bin
+/login.exe
+/credit.exe
+/wb2api.exe
+/signin_bin.exe
 
 # Config with secrets (use config.example.json)
 config.json
@@ -25,6 +29,7 @@ __pycache__/
 # 不写进这里会被 git add -A 直接提交（含明文 api_key）。
 .apikey
 .server.pid
+wb2api.pid
 *.log
 draft_*_folder/
 

@@ -192,6 +192,35 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
 
+#### Windows 原生运行（无需 Docker）
+
+Windows 10/11 自带的 PowerShell 与 `curl.exe` 即可管理后台进程。先准备配置并构建：
+
+```powershell
+Copy-Item config.example.json config.json
+# 编辑 config.json；建议把 listen 设为 127.0.0.1:7863，且务必设置 api_key
+
+go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+go build -trimpath -ldflags="-s -w" -o login.exe ./cmd/login
+go build -trimpath -ldflags="-s -w" -o signin_bin.exe ./cmd/signin
+go build -trimpath -ldflags="-s -w" -o credit.exe ./cmd/credit
+```
+
+使用仓库自带脚本在后台启停并查看状态：
+
+```powershell
+.\start-workbuddy2api.cmd
+.\status-workbuddy2api.cmd
+.\stop-workbuddy2api.cmd
+```
+
+PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.out.log`、
+`data/server.err.log`。停止脚本会先验证 PID 对应的可执行文件确为当前目录下的
+`wb2api.exe`，不会因陈旧 PID 误杀其他进程。
+
+添加账号可使用配套管理面板，或在 Git Bash 中运行现有 `login.sh`（它还负责 CN
+首次签到以及 Global 注册地区/trial 流程；不建议只手工调用 `login.exe` 后跳过这些步骤）。
+
 ### 验证
 
 ```bash

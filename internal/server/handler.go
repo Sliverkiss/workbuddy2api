@@ -47,6 +47,10 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+
+	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
+	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
+	AdminEnabled bool
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -103,6 +107,11 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// 运维管理端点（默认关闭，config admin.enabled 开启后生效）。
+	// 路径用 {uid} 通配而非查询参数：uid 是账号身份，放进路径便于审计与直观。
+	h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
+	h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
+	h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }

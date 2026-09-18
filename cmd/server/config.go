@@ -34,6 +34,14 @@ type Config struct {
 
 	Schedule config.Schedule `json:"schedule"`
 
+	// Admin 运维管理端点开关（issue #138/#118）。默认**关闭**：管理能力默认不暴露，
+	// 避免「开了网关就等于开了账号管理面」。开启后
+	// /admin/accounts/{uid}/{disable,enable,revive} 可用；鉴权与 /status 同源
+	// （withAuth + 同一个 api_key，不另立管理密钥）。
+	Admin struct {
+		Enabled bool `json:"enabled"` // 默认 false
+	} `json:"admin"`
+
 	Global struct {
 		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
 		// domain=workbuddy.ai 的账号判为 global 并路由 global base/路径。

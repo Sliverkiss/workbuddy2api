@@ -60,6 +60,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
 - **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
+- **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：`/admin/accounts/{uid}/{disable,enable,revive}` 端点 + `cmd/acct` CLI（默认关闭，`admin.enabled` 显式开启）
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复
 
 ### 请求链路
@@ -103,6 +104,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
 - 手动签到：`./signin.sh`（批量、幂等不重复计）
+- 账号停用 / 恢复：`./acct list | disable <uid> [原因] | enable <uid> | revive <uid>`（需 `admin.enabled`，走网关管理端点）
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
 
@@ -227,8 +229,15 @@ PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.o
 # 模型列表
 curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
 
-# 账号状态（汇总 + 每账号详情，disabled 账号透出 disabled_reason）
+# 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位）
 curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
+
+# 临时停用一个账号（需 config 里 admin.enabled = true）
+curl -s -X POST http://localhost:7863/admin/accounts/<uid>/disable \
+  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
+  -d '{"reason":"观察几天"}'
+# 或用 CLI（自动从 config.json 读网关地址与 key）
+./acct list && ./acct disable <uid> 观察几天 && ./acct enable <uid>
 
 # 流式聊天
 curl -sN http://localhost:7863/v1/chat/completions \

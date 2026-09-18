@@ -208,6 +208,8 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 运维管理端点开关（config admin.enabled，默认 false）。
+		AdminEnabled: cfg.Admin.Enabled,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

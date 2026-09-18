@@ -54,6 +54,12 @@ type Status struct {
 	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
 	Disabled          bool               `json:"disabled"`
 	DisabledReason    string             `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
+	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
+	// 两种可用操作不同：前者可 revive，后者该 enable）。
+	// 零值也显式写出（运维口径，同 consecutive_fails：缺失会让人误以为"没记录"）。
+	ManualDisabled bool   `json:"manual_disabled"`
+	ManualReason   string `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
 	SuccessCount      int64              `json:"success_count,omitempty"`
 	ErrTotal          int64              `json:"err_total,omitempty"`
 	LastSuccessTime   time.Time          `json:"last_success,omitempty"`
@@ -115,6 +121,12 @@ type entry struct {
 	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled        bool
 	reason          string
+	// manualDisabled 运维手动停用（issue #138/#118）：与 disabled 并列的独立状态位。
+	// 语义是「对话流量摘除」而非「账号冻结」——停用期间签到/token 保活/排程照常执行，
+	// 凭证与积分都是活的，只是不参与选号。与 disabled 各自独立清除，两位都清才回池。
+	// 持久化（stateAccount.ManualDisabled）：重启保留运维意图。
+	manualDisabled bool
+	manualReason   string
 	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
@@ -193,7 +205,7 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled {
+	if e.disabled || e.manualDisabled {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -218,7 +230,7 @@ func (e *entry) healthy(now time.Time) bool {
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && e.breakerUntil.IsZero()
+		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero()
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。
@@ -336,6 +348,11 @@ type stateAccount struct {
 	Credits      int64     `json:"credits"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
+	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
+	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
+	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。
+	ManualDisabled bool   `json:"manual_disabled"`
+	ManualReason   string `json:"manual_reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`

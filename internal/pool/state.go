@@ -63,15 +63,52 @@ func (p *Pool) ClearSessionDead(uid string) {
 // 账号回到池子（若无其他冷却/熔断则立即可选，健康检查自然接管）。
 // **不改** Disabled 在选号/状态端点的既有语义：disabled 号依然不参与选号，
 // 直到被本方法复活。不存在的 uid 为空操作。
-func (p *Pool) ReviveDisabled(uid string) {
+// 注意：不动 manualDisabled —— 自动禁用与手动停用是独立的两位，本方法只解系统判定，
+// 运维意图要由 SetManualDisabled(uid,false) 单独解除（否则一次 revive 会悄悄
+// 把运维明确摘除的号放回选号池）。返回 true 表示本次确实清除了自动禁用。
+func (p *Pool) ReviveDisabled(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok && e.disabled {
-		e.disabled = false
-		e.reason = ""
-		e.sessionDeadFails = 0
-		p.dirty.Store(true)
+	e, ok := p.byUID[uid]
+	if !ok || !e.disabled {
+		return false
 	}
+	e.disabled = false
+	e.reason = ""
+	e.sessionDeadFails = 0
+	p.dirty.Store(true)
+	return true
+}
+
+// SetManualDisabled 运维手动停用/恢复（issue #138/#118）：置位时只摘除选号流量，
+// 账号仍在池里——签到、token 保活、排程任务照常执行，凭证与积分是活的。
+// 与自动禁用（Disabled）互相独立：本方法不清 disabled，也不清冷却/熔断维度；
+// 恢复时同理只清 manualDisabled。两位都清空后账号自然回到选号池。
+// 幂等：重复置位/清除不报错，重复操作只更新原因文案。
+// 返回 (found, changed)：uid 不存在 → (false,false)；状态无变化 → (true,false)。
+func (p *Pool) SetManualDisabled(uid string, disabled bool, reason string) (found, changed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false, false
+	}
+	if e.manualDisabled == disabled && (!disabled || e.manualReason == reason) {
+		return true, false
+	}
+	p.setManualDisabledLocked(e, disabled, reason)
+	return true, true
+}
+
+// ManualDisabledState 读单个账号的手动停用态（供端点回显）。uid 不存在时 ok=false。
+func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, found := p.byUID[uid]
+	if !found {
+		return false, "", false
+	}
+	return e.manualDisabled, e.manualReason, true
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却域（余额恢复）。
@@ -341,7 +378,10 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 		}
 		total++
 		switch {
-		case e.disabled:
+		// 手动停用与自动禁用同归 disabled 计数：对「多少号不参与选号」这个运维
+		// 问题二者等价，分开会让 total/healthy/cooling/disabled 不闭合。
+		// 具体是哪一种看 /status 账号级的 manual_disabled/disabled 两位。
+		case e.disabled || e.manualDisabled:
 			disabled++
 		case !e.healthy(now):
 			cooling++
@@ -440,6 +480,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Cooling: now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
 		Reason:            reason,
 		Disabled:          e.disabled,
+		ManualDisabled:    e.manualDisabled,
 		SuccessCount:      e.successCount,
 		ErrTotal:          e.errTotal,
 		LastSuccessTime:   e.lastSuccess,
@@ -455,6 +496,11 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason
+	}
+	if st.ManualDisabled {
+		// 手动停用原因。与 DisabledReason 分开两个字段：叠加态下运维要能同时看到
+		//「我为什么摘它」和「系统为什么判它坏」，合并成一个字段会互相覆盖。
+		st.ManualReason = e.manualReason
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。口径与 Cooling 判定一致：

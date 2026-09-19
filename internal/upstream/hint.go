@@ -63,6 +63,9 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
 		return "request content was rejected by content policy; adjust the prompt and retry"
+	case ErrModerationBlocked:
+		// 同 content_blocked 口径（不含 "upstream" 字样）。
+		return "upstream moderation rejected this request on the selected account; the gateway will rotate and quarantine repeat offenders"
 	default:
 		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
 		return ""

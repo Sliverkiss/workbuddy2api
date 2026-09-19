@@ -51,24 +51,37 @@ type Status struct {
 	// 仅 modelCostTTL 内的有效观测，每模型一行（cost_per_1k + last_seen +
 	// samples）；无观测/全部过期 → nil（tier 1 未知层）。过期即消失（零回归，
 	// 只读遍历零风险）。tier 不单独落字段（可由 per1k≤0 推出，零冗余）。
-	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
-	Disabled          bool               `json:"disabled"`
-	DisabledReason    string             `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	ModelCosts     []ModelCostStatus `json:"model_costs,omitempty"`
+	Disabled       bool              `json:"disabled"`
+	DisabledReason string            `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
 	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
 	// 两种可用操作不同：前者可 revive，后者该 enable）。
 	// 零值也显式写出（运维口径，同 consecutive_fails：缺失会让人误以为"没记录"）。
-	ManualDisabled bool   `json:"manual_disabled"`
-	ManualReason   string `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
-	SuccessCount      int64              `json:"success_count,omitempty"`
-	ErrTotal          int64              `json:"err_total,omitempty"`
-	LastSuccessTime   time.Time          `json:"last_success,omitempty"`
-	LastErrTime       time.Time          `json:"last_err,omitempty"`
+	ManualDisabled  bool      `json:"manual_disabled"`
+	ManualReason    string    `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
+	SuccessCount    int64     `json:"success_count,omitempty"`
+	ErrTotal        int64     `json:"err_total,omitempty"`
+	LastSuccessTime time.Time `json:"last_success,omitempty"`
+	LastErrTime     time.Time `json:"last_err,omitempty"`
 	// ConsecutiveFails 连续失败计数（连败降权用，见 entry.consecutiveFails）。
 	// 零值也透出（运维口径：与 err_total/session_dead_fails 一致，零值缺失会让人
 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
 	ConsecutiveFails int       `json:"consecutive_fails"`
 	DegradeUntil     time.Time `json:"degrade_until,omitempty"` // 连败降权截止（非零且未过 = 降权中）
+	// Quarantined 隔离号池状态（content moderation quarantine）：true = 已隔离，
+	// 探活放行前恒不可选（healthy=false）。QuarantineUntil 是最早可探活时刻
+	// （静默期截止）——注意它**不是**恢复时刻：到期后仍需探活通过才回池。
+	// QuarantineReason 进隔离原因；ContentBlockedStreak 未隔离时的连续审核错误累计。
+	Quarantined          bool      `json:"quarantined"`
+	QuarantineUntil      time.Time `json:"quarantine_until,omitempty"`
+	QuarantineReason     string    `json:"quarantine_reason,omitempty"`
+	ContentBlockedStreak int       `json:"content_blocked_streak"`
+	// Probation 新号观察池状态：true = 仍在试炼期（未毕业）。ProbationPasses 累计
+	// 成功次数（入池探活那次也算）——0 = 未验活（不在真实流量路径上），
+	// >=1 = 可搭车，达阈值自动毕业（probation 转 false）。
+	Probation       bool `json:"probation"`
+	ProbationPasses int  `json:"probation_passes"`
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
@@ -111,23 +124,23 @@ type entry struct {
 	// 签到之间第四因子（weightOf ×8）不应失忆——签到 09:00/21:00 定期刷新，
 	// 窗口外重启会丢快过期积分偏好，可能让奖励积分到期作废。
 	creditsExpiring int64
-	successCount    int64     // 累计成功
+	successCount    int64 // 累计成功
 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
-	errTotal    int64         // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
-	lastErr     time.Time     // 最近一次错误时间
-	lastSuccess     time.Time // 最近一次成功时间
-	coolKind        CoolKind
-	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
-	disabled        bool
-	reason          string
+	errTotal    int64     // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
+	lastErr     time.Time // 最近一次错误时间
+	lastSuccess time.Time // 最近一次成功时间
+	coolKind    CoolKind
+	until       time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
+	disabled    bool
+	reason      string
 	// manualDisabled 运维手动停用（issue #138/#118）：与 disabled 并列的独立状态位。
 	// 语义是「对话流量摘除」而非「账号冻结」——停用期间签到/token 保活/排程照常执行，
 	// 凭证与积分都是活的，只是不参与选号。与 disabled 各自独立清除，两位都清才回池。
 	// 持久化（stateAccount.ManualDisabled）：重启保留运维意图。
 	manualDisabled bool
 	manualReason   string
-	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
+	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效（高并发/低精度时钟下：
@@ -175,6 +188,44 @@ type entry struct {
 	// 出池）。与冷却/熔断**取更长者不叠加**（healthy/degraded 判定统一取最远
 	// 截止），到期自动回池，无需显式复位。落盘仅未过期条目（同 breakerUntil）。
 	degradeUntil time.Time
+
+	// --- 隔离号池（quarantine）---
+	// 与冷却/熔断/降权的本质区别：**到期不放行**。静默期（quarantineUntil）过后
+	// 账号仍不可选（healthy=false），只有探活（良性 probe）通过才回到选号池——
+	// 否则被上游标记的号会随每次静默到期反复污染号池（这正是本机制要解决的痛点）。
+	// 与 disabled/manualDisabled 同为正交独立位：disableLocked/reviveCoolingLocked
+	// 不清隔离（隔离是审核信号，授权/session 恢复不证明审核解除）；仅探活成功
+	// （ReleaseQuarantine）或运维复活（ReviveDisabled）清除。
+	// 持久化（stateAccount.Quarantined 族）：重启不失去隔离状态——隔离期以小时计，
+	// 重启失忆会让被标记号立即回池打穿。
+	quarantined      bool      // 隔离中（探活放行前恒不可选）
+	quarantineUntil  time.Time // 最早可探活时刻（静默期截止；过后须探活，不自动回池）
+	quarantineReason string    // 进入隔离的原因（运维可见）
+	// quarantineHits 累计隔离次数（驱动续默退避 ×2^hits，封顶 quarantineSilenceMax）。
+	// 探活放行时清零（账号已被证明健康，再犯从基数重新起罚）。
+	quarantineHits int
+	// contentBlockedStreak 连续内容审核错误计数（未隔离时的累计器）：
+	// moderation_blocked 每命中一次 +1，达 quarantineThreshold 进隔离并清零；
+	// 任意成功（NoteSuccess）清零——成功是「账号当前未被标记」的最强证据。
+	// 持久化（同隔离域）：重启后继续累计，不重学。
+	contentBlockedStreak int
+
+	// --- 新号观察池（probation）---
+	// 新账号（首次进池）不直接吃主池流量，走「入池探活 → 极小份额搭车 → 毕业」三级：
+	//   probationPasses == 0：未验活，healthy() 恒 false——不在任何真实流量路径上
+	//     （含 /healthz 口径与全冷却兜底），只等探活 prober。
+	//   probationPasses >= 1：已验活，可由 pick 的搭车闸（canary，每 canaryInterval
+	//     一次且主池有健康号）与主池全空时的兜底选中；累计达 probationPromote 毕业。
+	// 毕业（probation=false）后与老号无异。隔离不清 probation：被标记的新号放行后
+	// 回到观察池继续试探，而不是直接进主池。
+	// 持久化（stateAccount.Probation 族）：重启不把已毕业号打回观察池，已搭车的
+	// 进度也不丢（新号试炼期以小时/天计）。
+	probation       bool
+	probationPasses int
+	// probeFails 入池探活连续无结论次数（网络/限流等非审核失败）：达
+	// probationProbeFailCap 进隔离（避免死凭证号被无限探活刷上游）。
+	probeFails int
+
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
 
@@ -201,11 +252,22 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 	return mc, true
 }
 
-// healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
+// healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期、未隔离）。
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
+// 隔离（quarantined）独立判定：静默到期后 healthy 仍为 false——放行只经探活
+// （ReleaseQuarantine），这是「时间一过又放出来污染号池」问题的解法本体。
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled || e.manualDisabled {
+		return false
+	}
+	if e.quarantined {
+		return false
+	}
+	// 未过入池探活的观察号（probationPasses==0）：不在任何真实流量路径上。
+	// 已验活（passes>=1）的观察号算 healthy——份额由 pick 的搭车闸控制，不由
+	// healthy 控制（否则主池全空时的兜底也用不上它，用户只能吃 503）。
+	if e.probation && e.probationPasses <= 0 {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -221,7 +283,7 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在任一有效的 6004
-// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断。
+// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断、未隔离。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
 // 本谓词仅供探活侧使用（ServableNow/ServableForRealm）：/healthz 无请求模型
 // 上下文，用「存在豁免形态」表达"该账号还有别的模型可服务"；
@@ -230,7 +292,7 @@ func (e *entry) healthy(now time.Time) bool {
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero()
+		!e.disabled && !e.manualDisabled && !e.quarantined && e.breakerUntil.IsZero()
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。
@@ -277,7 +339,7 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 // 从不回收——即「map 只增不减」。而 entry.modelCost 的注释明确声称
 // 「落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活（同 modelCooldowns 口径）」，
 // 模型级冷却表正是靠 pruneExpiredModelCooldowns 在 pick 写锁路径做真正删除的
-//（见 pick.go「map 不无限膨胀」）。两者口径不一致：一旦某模型的观测过期，它就会
+// （见 pick.go「map 不无限膨胀」）。两者口径不一致：一旦某模型的观测过期，它就会
 // 永久占据一条内存（进程重启才清），并在后续每一轮 pick 的遍历、每次 status 遍历里
 // 被反复判定为过期（只是没人删）。
 //
@@ -345,17 +407,17 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64     `json:"credits"`
-	Disabled     bool      `json:"disabled"`
-	Reason       string    `json:"reason,omitempty"`
+	Credits  int64  `json:"credits"`
+	Disabled bool   `json:"disabled"`
+	Reason   string `json:"reason,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
 	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
 	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。
-	ManualDisabled bool   `json:"manual_disabled"`
-	ManualReason   string `json:"manual_reason,omitempty"`
-	Until        time.Time `json:"until,omitempty"`
-	CoolKind     CoolKind  `json:"cool_kind"`
-	SuccessCount int64     `json:"success_count,omitempty"`
+	ManualDisabled bool      `json:"manual_disabled"`
+	ManualReason   string    `json:"manual_reason,omitempty"`
+	Until          time.Time `json:"until,omitempty"`
+	CoolKind       CoolKind  `json:"cool_kind"`
+	SuccessCount   int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
 	// 运维可见的运行态计数（err_total/soft_streak/session_dead_fails/credits_expiring）
@@ -394,6 +456,20 @@ type stateAccount struct {
 	// （weightOf ×8）的快过期积分偏好——重启后到下次签到之间不应失忆。
 	// 零值也显式写出（运维口径，见 err_total 注释）。
 	CreditsExpiring int64 `json:"credits_expiring"`
+	// Quarantined 隔离号池（quarantine）持久化。与冷却不同：quarantineUntil **不做**
+	// 过期惰性过滤——静默到期 ≠ 恢复（还差探活），到期的隔离条目恰是探活 prober
+	// 重启后要立即处理的对象，过期即丢会让被标记号重启后直接回池。
+	Quarantined          bool       `json:"quarantined"`
+	QuarantineUntil      *time.Time `json:"quarantine_until,omitempty"`
+	QuarantineReason     string     `json:"quarantine_reason,omitempty"`
+	QuarantineHits       int        `json:"quarantine_hits"`
+	ContentBlockedStreak int        `json:"content_blocked_streak"`
+	// Probation 新号观察池（见 entry.probation）。持久化：已毕业号不得因重启打回
+	// 观察池（否则每次重启都会让存量号先"降级"再毕业，主池间歇性缩水）；试炼进度
+	// （passes）也必须留——新号试炼以小时/天计，重启丢进度 = 反复重学。
+	// probeFails 不持久化：短期探活重试计数，重启从零可接受（达阈才进隔离）。
+	Probation       bool `json:"probation"`
+	ProbationPasses int  `json:"probation_passes"`
 	// ModelCooldowns 6004 模型级独立冷却表（model → 冷却记录）。持久化：
 	// PR #96 把 6004 改成精确对齐上游重置墙钟后，单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化导致每次重启 healthyForModel 失忆、重新踩一遍
@@ -515,6 +591,42 @@ const defaultCostExploreInterval = 30 * time.Minute
 
 // sessionDeadReason 12153 判定为 session 死亡时的持久化 reason。
 const sessionDeadReason = "12153 session dead"
+
+// 隔离号池默认参数（SetQuarantine 注入，见 quarantine.go）。
+//   - defaultQuarantineThreshold=1：内容审核是**恶性错误**——账号一旦被判提权审核，
+//     经它的一切请求都可能被拦（用户感知为"这个模型坏了"）。一次即隔离，代价由
+//     probe delay + 探活放行兜住（内容级误伤时该号 1 分钟后探活即回池）。
+//   - defaultQuarantineProbeDelay=1m：进隔离到首次可探活的等待（不是惩罚）。
+//   - defaultQuarantineSilence=1h / Max=24h：**探活失败后**的退避基数与封顶。
+const (
+	defaultQuarantineThreshold  = 1
+	defaultQuarantineProbeDelay = time.Minute
+	defaultQuarantineSilence    = time.Hour
+	defaultQuarantineMax        = 24 * time.Hour
+)
+
+// quarantineShiftMax 续默退避的最大左移位数（防 1<<hits 溢出）。
+const quarantineShiftMax = 16
+
+// quarantineReasonText 隔离原因文案（内容审核拦截，/status 可见）。
+const quarantineReasonText = "content moderation quarantine"
+
+// 新号观察池默认参数（SetProbation 注入，见 probation.go）。
+//   - defaultProbationPromote=3：毕业所需累计成功次数（含入池探活那次）——3 次
+//     真实/半真实成功足以证明凭证、模型权限与限流画像正常，又不至于让新号长期
+//     停滞在观察池。
+//   - defaultCanaryInterval=5m：搭车节流——观察池号每该间隔最多吃一次真实请求
+//     （池级单闸，不是每号一闸：新号再多，对主池流量的总侵入也有上界）。
+//   - probationProbeFailCap=3：入池探活连续 3 次无结论（网络/限流/5xx）即进隔离，
+//     避免死凭证号被无限探活（探活本身也是对上游的请求）。
+const (
+	defaultProbationPromote = 3
+	defaultCanaryInterval   = 5 * time.Minute
+	probationProbeFailCap   = 3
+)
+
+// probationProbeFailReason 入池探活连续无结论时的隔离原因文案。
+const probationProbeFailReason = "probation probe inconclusive (no usable chat path)"
 
 // SessionDeadThreshold 暴露连续 12153 的禁用阈值（供 scheduler 日志/运维文档引用）。
 func SessionDeadThreshold() int { return sessionDeadThreshold }

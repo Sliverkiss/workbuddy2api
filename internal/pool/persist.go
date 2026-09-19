@@ -183,6 +183,20 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			sessionDeadFails: s.SessionDeadFails,
 			consecutiveFails: s.ConsecutiveFails,
 			creditsExpiring:  expiring,
+			// 隔离域恢复：不做 until 过期过滤（静默到期仍须探活，见落盘侧注释）。
+			quarantined:          s.Quarantined,
+			quarantineReason:     s.QuarantineReason,
+			quarantineHits:       s.QuarantineHits,
+			contentBlockedStreak: s.ContentBlockedStreak,
+			// 观察池恢复（probation.go）：Probation 恒恢复——已毕业号（false）不得
+			// 因重启被打回观察池（否则每次重启都削一遍已有新号的可用性）；仍在池
+			// 中的号连同已累计的 passes 一起恢复，搭车进度与探活进度不重学。
+			// probeFails 有意不持久化（短期重试计数，重启从零可接受）。
+			probation:       s.Probation,
+			probationPasses: s.ProbationPasses,
+		}
+		if s.QuarantineUntil != nil {
+			e.quarantineUntil = *s.QuarantineUntil
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
@@ -410,28 +424,46 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		// 的不一致快照（模型级冷却不该污染账号级 coolKind/reason 域）。disabled
 		// 账号的 reason 是禁用原因，不在冷却语义内，照常保留。
 		// 与 statusOf（state.go）共用 cooledReasonLocked，保证落盘与查询同口径。
+		// 隔离号池（quarantine）落盘：quarantined 恒写出（零值显式，运维口径），
+		// quarantineUntil 用指针且**不做**过期惰性过滤——静默到期 ≠ 恢复（还差
+		// 探活），到期的隔离条目正是探活 prober 重启后要立即处理的对象，过期即丢
+		// 会让被标记号重启后直接回池。
+		var quarantineUntil *time.Time
+		if e.quarantined && !e.quarantineUntil.IsZero() {
+			qu := e.quarantineUntil
+			quarantineUntil = &qu
+		}
 		coolKind, reason := cooledReasonLocked(e, now)
 		sf.Accounts[uid] = stateAccount{
-			Credits:          e.credits,
-			Disabled:         e.disabled,
-			Reason:           reason,
-			ManualDisabled:   e.manualDisabled,
-			ManualReason:     e.manualReason,
-			Until:            e.until,
-			CoolKind:         coolKind,
-			SuccessCount:     e.successCount,
-			ErrTotal:         e.errTotal,
-			LastSuccess:      e.lastSuccess,
-			LastErr:          e.lastErr,
-			SoftStreak:       e.softStreak,
-			SessionDeadFails: e.sessionDeadFails,
-			ConsecutiveFails: e.consecutiveFails,
-			DegradeUntil:     degradeUntil,
-			BreakerUntil:     breakerUntil,
-			RetryCount:       retryCount,
-			CreditsExpiring:  e.creditsExpiring,
-			ModelCooldowns:   mcs,
-			ModelCosts:       mcosts,
+			Credits:              e.credits,
+			Disabled:             e.disabled,
+			Reason:               reason,
+			ManualDisabled:       e.manualDisabled,
+			ManualReason:         e.manualReason,
+			Until:                e.until,
+			CoolKind:             coolKind,
+			SuccessCount:         e.successCount,
+			ErrTotal:             e.errTotal,
+			LastSuccess:          e.lastSuccess,
+			LastErr:              e.lastErr,
+			SoftStreak:           e.softStreak,
+			SessionDeadFails:     e.sessionDeadFails,
+			ConsecutiveFails:     e.consecutiveFails,
+			DegradeUntil:         degradeUntil,
+			BreakerUntil:         breakerUntil,
+			RetryCount:           retryCount,
+			CreditsExpiring:      e.creditsExpiring,
+			Quarantined:          e.quarantined,
+			QuarantineUntil:      quarantineUntil,
+			QuarantineReason:     e.quarantineReason,
+			QuarantineHits:       e.quarantineHits,
+			ContentBlockedStreak: e.contentBlockedStreak,
+			// 观察池（probation.go）：与隔离域同口径恒写出（零值显式）。这两项是
+			// 「新号是否已试炼完」的唯一记忆，丢失即等于把已毕业号打回观察池。
+			Probation:       e.probation,
+			ProbationPasses: e.probationPasses,
+			ModelCooldowns:  mcs,
+			ModelCosts:      mcosts,
 		}
 	}
 	return sf

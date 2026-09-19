@@ -50,7 +50,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if reqModel != "" {
 		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
 	}
+	// 候选分两桶：主池（老号与已毕业号）与观察池（已验活但未毕业的新号）。
+	// 观察号不进常规三因子选号——它们的流量份额由搭车闸（canaryInterval，**池级
+	// 单闸**）单独控制，否则新号会按权重与老号抢流量。未验活（probationPasses==0）
+	// 的观察号 healthy() 恒 false，两桶都进不来（用户永不吃"可能被审核拦"的号）。
 	var cands []*entry
+	var probCands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
@@ -61,9 +66,33 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
+		if e.probation {
+			probCands = append(probCands, e)
+			continue
+		}
 		cands = append(cands, e)
 	}
+	// 搭车改道（新号观察池，机制见 probation.go）：把**本个既有真实请求**改道给
+	// 一个已验活观察号——零新增上游请求（与 costTier 探索同哲学；不碰 WAF/风控，
+	// 这正是否决"影子测试"的原因），同时该请求本身即一次真实负载验证（探活只证
+	// 凭证/模型可用，证不了限流/计费画像）。
+	// 放行条件两条同时成立（用户侧稳定性的硬约束）：
+	//   1. 主池**有**健康候选——搭车号失败时同请求轮转仍能兜回主池，用户最多多等
+	//      一次退避，不会因搭车失败而失败；
+	//   2. 距上次搭车 ≥ canaryInterval——池级单闸，观察号再多，对主池流量的总侵入
+	//      也有上界（不是每号一闸）。
+	// 位置在成本分层之前：本请求已不归主池，层内偏好无意义。
+	if len(cands) > 0 && len(probCands) > 0 && p.canaryDueLocked(now) {
+		p.lastCanaryAt = now
+		return p.pickProbationLocked(probCands, now, "canary")
+	}
 	if len(cands) == 0 {
+		if len(probCands) > 0 {
+			// 主池全空：观察号兜底（比 503 强）。**不走搭车闸**——此刻它是唯一可用
+			// 容量，节流只会把用户推向 503；也不推进 lastCanaryAt（这是兜底不是搭车，
+			// 不该消耗主池恢复后的搭车窗口）。兜底只收已验活号（probCands 本身的口径）。
+			return p.pickProbationLocked(probCands, now, "fallback")
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm)
@@ -225,6 +254,36 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	return e.a
 }
 
+// pickProbationLocked 在已验活的观察号中按三因子权重加权随机选中一个并记录
+// （lastUsed/pickSeq/usedSeq）——与主池同口径的选中记录，保证观察号也遵守
+// 防惊群/LRU 的严格全序语义。why 仅用于日志（canary = 搭车改道 / fallback =
+// 主池全空兜底）。
+//
+// 权重口径：maxCredits 取**观察号子集**最大 credits（不是全池）：本函数在观察号
+// 内部抽签，全集口径会因观察号 credits 普遍偏低而把 credits 项整体压扁，退化成
+// 纯 idle 抽签（与 costTier 探索的子集口径问题同源，但这里不存在"两阶段可比"的
+// 需求——观察号与主池不共享抽签）。
+// 调用方必须已持有 p.mu 写锁，且 cands 非空（全是 probation && passes>=1 的号）。
+func (p *Pool) pickProbationLocked(cands []*entry, now time.Time, why string) *auth.Auth {
+	var maxCredits int64
+	for _, e := range cands {
+		if e.credits > maxCredits {
+			maxCredits = e.credits
+		}
+	}
+	ws := make([]weighted, 0, len(cands))
+	for _, e := range cands {
+		ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now)})
+	}
+	e := p.pickWeighted(ws)
+	e.lastUsed = now
+	p.pickSeq++
+	e.usedSeq = p.pickSeq
+	log.Printf("[pool] probation %s acct=%s passes=%d/%d",
+		why, logfmt.Label(e.a.UID, e.a.Nickname), e.probationPasses, p.probationPromoteOrLocked())
+	return e.a
+}
+
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
@@ -240,6 +299,18 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.disabled || e.manualDisabled {
 			continue // 禁用/手动停用的账号永不参与兜底
+		}
+		if e.quarantined {
+			// 隔离号池：静默到期也**不经兜底回流**——兜底正是「时间一过又放出来
+			// 污染号池」的漏洞面，隔离的解除只经探活（quarantine.ReleaseQuarantine）。
+			continue
+		}
+		if e.probation && e.probationPasses <= 0 {
+			// 未验活的新号：兜底同样不放行。兜底会绕开 healthy()（它只按 expiry 选），
+			// 若不显式排除，一个处于软冷却的未验活新号会被兜底选中接真实用户请求——
+			// 正是"不拿未知风险的号接用户请求"要堵的口子（已验活号由 pick 的
+			// probCands 兜底通道负责，不经过这里）。
+			continue
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402

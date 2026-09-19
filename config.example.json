@@ -84,5 +84,20 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "quarantine": {
+    "enabled": true,
+    "threshold": 1,
+    "probe_delay": "1m",
+    "silence": "1h",
+    "silence_max": "24h",
+    "probe_interval": "5m",
+    "probe_model_cn": "",
+    "probe_model_global": ""
+  },
+  "probation": {
+    "enabled": true,
+    "promote_successes": 3,
+    "canary_interval": "5m"
   }
 }

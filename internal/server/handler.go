@@ -1064,6 +1064,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 内容策略拦截：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 首遇由 chatCompletions 内降级重试处理；最终仍拦则回 400
 		// content_blocked（防火墙文案），不再轮转、不暴露账号/冷却/错误码。
+	case upstream.ErrModerationBlocked:
+		// 内容审核拦截（「内容未通过安全审核」等）：**账号级**审核信号（同一良性
+		// 内容跨账号可过 ⇒ 账号被上游提权审核），区别于 ErrContentBlocked 的内容
+		// 指纹误报。处理两件事：
+		//   1. 喂隔离计数（NoteContentBlocked）：连续 N 次达阈 → 进隔离号池
+		//      （静默期过后须经探活放行，见 pool/quarantine.go）；
+		//   2. 照常轮转换号（本分支 return 后 chatCompletions continue）：该号对该
+		//      请求不可用，换干净号是当下唯一有效动作。不冷却不熔断——普通报错
+		//      走原本机制，审核错误只走隔离通道，两套惩罚不叠加。
+		h.cfg.Pool.NoteContentBlocked(uid)
 	case upstream.ErrPromptTooLong:
 		// 11115「prompt is too long」：请求的问题不是账号的问题（同一 body 换任何
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked

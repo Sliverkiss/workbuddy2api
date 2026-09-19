@@ -3,12 +3,14 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logfmt"
 )
 
 type Pool struct {
@@ -42,6 +44,29 @@ type Pool struct {
 	degradeThreshold   int
 	degradeCooldown    time.Duration
 	degradeCooldownMax time.Duration
+	// quarantineThreshold / quarantineSilence / quarantineSilenceMax 隔离号池参数
+	// （SetQuarantine 注入；默认值见 defaultQuarantine*）。零值/未注入走默认。
+	quarantineThreshold  int
+	quarantineSilence    time.Duration
+	quarantineSilenceMax time.Duration
+	// quarantineProbeDelay 进隔离后到「首次可探活」的等待（SetQuarantine 注入；
+	// 默认 defaultQuarantineProbeDelay=1m）。语义是「别把刚被标记的号立刻放上真实
+	// 流量」，而不是对号的惩罚时长——惩罚时长是探活失败后的 silence 退避。
+	quarantineProbeDelay time.Duration
+	// quarantineOn 隔离机制总开关（SetQuarantineEnabled 注入；默认 true）。
+	// false 时 NoteContentBlocked 退化为空操作（不计数不隔离，回到无隔离行为），
+	// 探活 loop 也不会启动（config quarantine.enabled 单点控制两侧）。
+	quarantineOn bool
+	// 新号观察池（probation）：新账号首次进池不直接吃主池流量，先过入池探活，
+	// 再以极小份额搭车真实请求（canary），累计成功达 probationPromote 毕业进主池。
+	// 三参数由 SetProbation 注入：probationOn 默认 true / probationPromote 默认 3 /
+	// canaryInterval 默认 5m。机制本体见 probation.go。
+	probationOn      bool
+	probationPromote int
+	canaryInterval   time.Duration
+	// lastCanaryAt 最近一次「观察池搭车」选中时刻（运行态，不持久化；重启失去
+	// 节流记忆 → 每池最多多打一次搭车，代价可忽略）。
+	lastCanaryAt time.Time
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -89,6 +114,15 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		quarantineOn:        true, // 隔离号池默认开启（content moderation quarantine）
+		// 观察池**池级默认关**（策略由 SetProbation 注入，见该函数）。为什么不像
+		// quarantineOn 那样默认开：probation 会在 Add 时把新条目挡在选号之外，改变
+		// 「构造池 + Add 即可选号」的既有契约——池构造器不该携带这种策略副作用
+		// （隔离只作用于错误路径，不改变新账号可选性，故可安全默认开）。
+		// 生产侧由 main 从 config probation.enabled（默认 true）显式注入。
+		probationOn:      false,
+		canaryInterval:   defaultCanaryInterval,
+		probationPromote: defaultProbationPromote,
 	}
 	if stateFp != "" {
 		p.load()
@@ -305,5 +339,14 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 		e.a = a // 保留 credits/cooling 状态
 		return
 	}
-	p.byUID[a.UID] = &entry{a: a}
+	e := &entry{a: a}
+	// 新号观察池：首次进池的账号（state.json 无历史记录，也不是本次从快照恢复的
+	// 条目——恢复走 applyAccountsLocked，不经本函数）标记为观察成员。
+	// 老号不受影响：upsert 命中已存在条目时只换凭证。
+	if p.probationOn {
+		e.probation = true
+		log.Printf("[pool] probation enter acct=%s (new account): probe-gated, canary share after pass",
+			logfmt.Label(a.UID, a.Nickname))
+	}
+	p.byUID[a.UID] = e
 }

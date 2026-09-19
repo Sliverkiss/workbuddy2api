@@ -24,19 +24,20 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
-	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
-	ErrClient                        // 其他 4xx / 业务错误
+	ErrNone              ErrKind = iota // 成功
+	ErrHardCredit                       // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                         // 429 软限流 → 短冷却
+	ErrSessionDead                      // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                         // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                           // 5xx 上游故障
+	ErrContentBlocked                   // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrModerationBlocked                // 内容审核拦截（「内容未通过安全审核」等，4xx/5xx 均有实测）→ 账号级信号：轮转换号 + 隔离计数（quarantine）
+	ErrBadParams                        // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
+	ErrAccountFault                     // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                     // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrWafBlock                         // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
+	ErrPromptTooLong                    // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrClient                           // 其他 4xx / 业务错误
 )
 
 func (k ErrKind) String() string {
@@ -53,6 +54,8 @@ func (k ErrKind) String() string {
 		return "server"
 	case ErrContentBlocked:
 		return "content_blocked"
+	case ErrModerationBlocked:
+		return "moderation_blocked"
 	case ErrBadParams:
 		return "bad_params"
 	case ErrAccountFault:
@@ -171,6 +174,25 @@ var contentBlockedRule = errorRule{kind: ErrContentBlocked, mode: matchLower, pa
 	"blocked by security policy",
 	"unapproved channel",
 	"illegal api invocation",
+}}
+
+// moderationBlockRule 内容审核拦截（账号级信号）关键词。
+//
+// 定位：与 contentBlockedRule（11128 指纹误报，内容的问题）不同，本规则命中的是
+// 上游内容审核对**账号**的拒绝——实测形态（2026-09-18 生产报错）：
+//
+//	{"code":-32603,"message":"Internal error","data":{"code":0,
+//	 "message":"内容未通过安全审核，请调整后重试。",...,"statusCode":400,...}}
+//
+// 同一良性内容跨账号测试时被标记账号持续被拦、干净账号通过 ⇒ 这是账号被上游
+// 提权审核的信号（账号级），不是请求内容的问题。handler 据此喂 pool 隔离计数
+// （quarantine.NoteContentBlocked），频繁命中即进隔离号池（见 internal/pool/quarantine.go）。
+//
+// 措辞按生产实测原文的稳定主干收录（"内容未通过安全审核"），宁缺毋滥：
+// "内容审核" 这种宽词会误伤成功响应里的提示文案。
+var moderationBlockRule = errorRule{kind: ErrModerationBlocked, mode: matchLower, patterns: []string{
+	"内容未通过安全审核",
+	"内容审核未通过",
 }}
 
 // badParamsRule 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
@@ -518,6 +540,14 @@ func Classify(status int, body string) ErrKind {
 	}
 	if softRateRule.hit(body, lower) {
 		return ErrSoftRate
+	}
+	// 内容审核拦截（moderationBlockRule）：判在 404/5xx 状态码兜底**之前**——
+	// 实测该形态上游以 500 + "Internal error" 信封携带（statusCode 400 在 data 内），
+	// 若不前置会被 5xx 兜底吞成 ErrServer（喂熔断且不进隔离计数）。审核语义比
+	// 状态码更具体（账号级信号），故先于 404/5xx 判定；429/限流/余额语义已在
+	// 上方各层短路，不受影响。
+	if moderationBlockRule.hit(body, lower) {
+		return ErrModerationBlocked
 	}
 	// 11115「prompt is too long」（任务书 prompt-too-long §1）：判在 404/5xx/
 	// WAF/内容策略/参数错误/通用 4xx 之前——请求级语义最具体（上下文超限），须

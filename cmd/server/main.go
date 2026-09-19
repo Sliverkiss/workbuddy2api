@@ -68,6 +68,13 @@ func main() {
 	p := pool.New(cfg.StateFile)
 	defer p.Close() // 进程退出前停后台落盘 goroutine + 最后补一次落盘（FIX-4:goroutine 泄漏）
 	p.SetStore(store)
+	// 新号观察池策略必须在 SyncToDir **之前**注入：probation 的标记发生在条目首次
+	// 进池（upsertLocked）那一刻，晚注入会让启动时新出现的凭证文件（state.json 无
+	// 历史记录的真新号）错过标记，只能等下次进池才被观察。
+	// 默认开启：毕业需 3 次成功 / 搭车节流 5m 池级单闸。
+	p.SetProbation(cfg.Probation.Enabled, cfg.Probation.PromoteSuccesses, cfg.ProbationCanaryIntervalDur)
+	log.Printf("[pool] 新号观察池：enabled=%v 毕业阈值=%d 次 搭车节流=%s（未验活新号不进真实流量）",
+		cfg.Probation.Enabled, cfg.Probation.PromoteSuccesses, cfg.ProbationCanaryIntervalDur)
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
@@ -83,6 +90,9 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	// 隔离号池参数（默认 1 次即隔离 / 隔离后 1m 可探活 / 续默 1h 起封顶 24h）。
+	p.SetQuarantine(cfg.Quarantine.Threshold, cfg.QuarantineProbeDelayDur, cfg.QuarantineSilenceDur, cfg.QuarantineSilenceMaxDur)
+	p.SetQuarantineEnabled(cfg.Quarantine.Enabled) // 隔离总开关（false = 不隔离不探活）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 
@@ -215,6 +225,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 探活 prober（独立于排程槽：5m 级轮询）。两条队列：① 隔离号静默到期 → 良性
+	// 探活 → 放行/续默；② 观察池新号未验活 → 入池探活 → 记毕业进度/进隔离。
+	// quarantine.enabled=false 时空转退出（隔离号不会自动放行、新号不会拿到搭车资格）。
+	go sch.RunProbeLoop(ctx, scheduler.QuarantineProbeConfig{
+		Disabled:         !cfg.Quarantine.Enabled,
+		Interval:         cfg.QuarantineProbeIntervalDur,
+		ProbeModelCN:     cfg.Quarantine.ProbeModelCN,
+		ProbeModelGlobal: cfg.Quarantine.ProbeModelGlobal,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

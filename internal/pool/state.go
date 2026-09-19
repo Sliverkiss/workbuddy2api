@@ -66,6 +66,8 @@ func (p *Pool) ClearSessionDead(uid string) {
 // 注意：不动 manualDisabled —— 自动禁用与手动停用是独立的两位，本方法只解系统判定，
 // 运维意图要由 SetManualDisabled(uid,false) 单独解除（否则一次 revive 会悄悄
 // 把运维明确摘除的号放回选号池）。返回 true 表示本次确实清除了自动禁用。
+// 隔离域（quarantine）随复活一并清除：revive 是运维「这个号能用」的明确表态，
+// 与探活通过同级的放行证据（quarantine.ReleaseQuarantine 同一套清零）。
 func (p *Pool) ReviveDisabled(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -76,6 +78,7 @@ func (p *Pool) ReviveDisabled(uid string) bool {
 	e.disabled = false
 	e.reason = ""
 	e.sessionDeadFails = 0
+	e.clearQuarantineLocked()
 	p.dirty.Store(true)
 	return true
 }
@@ -256,6 +259,16 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.sessionDeadFails = 0
 		e.consecutiveFails = 0
 		e.degradeUntil = time.Time{}
+		// 隔离计数（contentBlockedStreak）随成功清零：成功是「账号当前未被上游
+		// 提权审核」的最强证据，连续审核错误的累计就此归零。**不碰 quarantined**——
+		// 隔离号没有真实流量走不到这里；隔离的解除只经探活（ReleaseQuarantine）。
+		e.contentBlockedStreak = 0
+		// 观察池进度（probation.go）：观察号每次真实成功都是毕业证据（搭车请求、
+		// 粘性命中、兜底命中都走这里），达阈自动毕业转老号同权。非观察号空操作。
+		// 放在最后：probationProgressLocked 自带 dirty 标记与日志。
+		if e.probation {
+			p.probationProgressLocked(e, "chat success")
+		}
 		p.dirty.Store(true)
 	}
 }
@@ -472,26 +485,36 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 成本台账（P1-anti-monopoly）：每模型一行（modelCost 内 TTL 未过期的
 		// 条目），运维据此自查「为什么总选它」；只读遍历零风险，过期即消失。
 		ModelCosts: p.modelCostsStatusLocked(e, now),
-		Realm:             e.a.Realm(),
-		Nickname:          e.a.Nickname,
-		Credits:           e.credits,
-		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
-		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
-		Cooling: now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Reason:            reason,
-		Disabled:          e.disabled,
-		ManualDisabled:    e.manualDisabled,
-		SuccessCount:      e.successCount,
-		ErrTotal:          e.errTotal,
-		LastSuccessTime:   e.lastSuccess,
-		LastErrTime:       e.lastErr,
-		ConsecutiveFails:  e.consecutiveFails,
-		DegradeUntil:      e.degradeUntil,
-		Until:             e.until,
-		SoftStreak:        e.softStreak,
-		InFlight:          int(e.inFlight.Load()),
-		BreakerFails:      e.fails,
-		BreakerUntil:      e.breakerUntil,
+		Realm:      e.a.Realm(),
+		Nickname:   e.a.Nickname,
+		Credits:    e.credits,
+		// Cooling 口径含连败降权（degradeUntil）与隔离（quarantined）：两者都是
+		// 「非健康、非禁用」的不可选态，运维在 /status 应看到；具体是哪一种看
+		// CoolKind/reason（隔离恒 cool_kind=quarantine）。
+		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil) || e.quarantined,
+		Reason:               reason,
+		Disabled:             e.disabled,
+		ManualDisabled:       e.manualDisabled,
+		Quarantined:          e.quarantined,
+		QuarantineUntil:      e.quarantineUntil,
+		QuarantineReason:     e.quarantineReason,
+		ContentBlockedStreak: e.contentBlockedStreak,
+		// 观察池（probation.go）：Probation=true 表示新号仍在试炼期，不是"不可用"
+		// （passes>=1 时可被搭车/兜底选中），故**不进 Cooling 口径**——它是可用性
+		// 分级，不是冷却。运维据 probation_passes 判断它离毕业还差几次成功。
+		Probation:        e.probation,
+		ProbationPasses:  e.probationPasses,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
@@ -503,28 +526,42 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		st.ManualReason = e.manualReason
 	}
 	if st.Cooling {
-		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。口径与 Cooling 判定一致：
-		// 取 until / breakerUntil / degradeUntil 中更远的截止（发现 5——熔断冷却的号
-		// 原实现只算 until，显示"冷却中却 0 秒恢复"；BreakerUntil 虽单独透出，两口径
-		// 不一致误导排查）。全部过期不会进入本分支（Cooling=false）。
-		remain := time.Until(e.until)
-		if b := time.Until(e.breakerUntil); b > remain {
-			remain = b
-		}
-		if d := time.Until(e.degradeUntil); d > remain {
-			remain = d
-		}
-		st.CoolRemaining = int64(remain.Seconds() + 0.999)
-		if st.CoolRemaining < 0 {
-			st.CoolRemaining = 0
-		}
-		st.CoolKind = e.coolKind.String()
-		// 纯降权形态（无生效的 until/熔断）时 reason 取连败文案：降权由 NoteFailures
-		// 触发，不写 until/reason（coolKind 也不是它写的），运维在 /status 需要看到
-		// "为什么非健康"。有生效冷却时以冷却 reason 为准（冷却通常语义更具体）。
-		if st.Reason == "" && now.Before(e.degradeUntil) {
-			st.Reason = degradeReason
-			st.CoolKind = "degrade"
+		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
+		// 隔离号取 quarantineUntil（最早可探活时刻）：到期后仍不可选（等探活），
+		// 但 remaining 显示 0 + cool_kind=quarantine 已表达「静默过、待探活」。
+		// 非隔离号口径与 Cooling 判定一致：取 until / breakerUntil / degradeUntil
+		// 中更远的截止（发现 5——熔断冷却的号原实现只算 until，显示"冷却中却
+		// 0 秒恢复"；BreakerUntil 虽单独透出，两口径不一致误导排查）。
+		if e.quarantined {
+			remain := time.Until(e.quarantineUntil)
+			st.CoolRemaining = int64(remain.Seconds() + 0.999)
+			if st.CoolRemaining < 0 {
+				st.CoolRemaining = 0
+			}
+			st.CoolKind = "quarantine"
+			if st.Reason == "" {
+				st.Reason = e.quarantineReason
+			}
+		} else {
+			remain := time.Until(e.until)
+			if b := time.Until(e.breakerUntil); b > remain {
+				remain = b
+			}
+			if d := time.Until(e.degradeUntil); d > remain {
+				remain = d
+			}
+			st.CoolRemaining = int64(remain.Seconds() + 0.999)
+			if st.CoolRemaining < 0 {
+				st.CoolRemaining = 0
+			}
+			st.CoolKind = e.coolKind.String()
+			// 纯降权形态（无生效的 until/熔断）时 reason 取连败文案：降权由 NoteFailures
+			// 触发，不写 until/reason（coolKind 也不是它写的），运维在 /status 需要看到
+			// "为什么非健康"。有生效冷却时以冷却 reason 为准（冷却通常语义更具体）。
+			if st.Reason == "" && now.Before(e.degradeUntil) {
+				st.Reason = degradeReason
+				st.CoolKind = "degrade"
+			}
 		}
 	}
 	return st

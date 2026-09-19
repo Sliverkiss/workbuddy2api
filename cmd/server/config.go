@@ -117,17 +117,17 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
-		DegradeThreshold   int    `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
-		DegradeCooldownMax string `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
+		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
@@ -140,6 +140,51 @@ type Config struct {
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
 	} `json:"pool"`
+
+	// Quarantine 隔离号池（content moderation quarantine）：命中上游内容审核
+	// （moderation_blocked，如「内容未通过安全审核」）的账号出池，静默期过后
+	// **不自动回池**，须由探活 prober 用良性请求实测——通过放行、仍被拦续默退避。
+	Quarantine struct {
+		// Enabled 总开关（含探活）。默认 true。false 时隔离机制整体关停
+		// （不隔离、不探活，回到无隔离行为）；已隔离的号保持隔离，只能手工 revive。
+		Enabled bool `json:"enabled"`
+		// Threshold 触发隔离的连续审核错误次数（成功即清零重计），默认 1。
+		// **内容是恶性错误**：账号一旦被判提权审核，经它的一切请求都可能被拦，
+		// 故一次即隔离。误伤代价由 ProbeDelay + 探活放行兜住。设 >1 可退回旧行为。
+		Threshold int `json:"threshold"`
+		// ProbeDelay 进隔离到「首次可探活」的等待，默认 "1m"。**不是惩罚时长**：
+		// 惩罚是探活失败后的 Silence 指数退避。这是 threshold=1 可行的前提——
+		// 内容级误伤（良性内容必过探活）只损失该号几分钟容量。
+		ProbeDelay string `json:"probe_delay"`
+		// Silence 探活失败后的续默退避基数，默认 "1h"。按 ×2^hits 退避。
+		Silence string `json:"silence"`
+		// SilenceMax 续默退避封顶，默认 "24h"（最多一天探一次）。
+		SilenceMax string `json:"silence_max"`
+		// ProbeInterval 探活轮询间隔，默认 "5m"。
+		ProbeInterval string `json:"probe_interval"`
+		// ProbeModelCN / ProbeModelGlobal 按 realm 的探活模型（良性一句话 + 16
+		// token）；空回落默认（cn: deepseek-v4.1-flash / global: gpt-5.4）。
+		ProbeModelCN     string `json:"probe_model_cn"`
+		ProbeModelGlobal string `json:"probe_model_global"`
+	} `json:"quarantine"`
+
+	// Probation 新号观察池：新账号不直接吃主池流量，走「入池探活 → 极小份额搭车
+	// 真实请求 → 达阈毕业」。动机是用户侧稳定——新号的凭证/模型权限/限流画像/
+	// 风控状态都是未知数，不该把未知风险摊到用户请求上。
+	//
+	// 为什么不是影子测试：本仓流量纪律是「零新增上游请求」（影子会让同出口 IP 的
+	// 请求量翻倍，直接踩 WAF/风控——WAF 403 修复的教训）。故走**搭车改道**：
+	// 把一个既有真实请求改道给观察号，增量上游请求 = 0。
+	Probation struct {
+		// Enabled 总开关，默认 true。false 时新号直接按老号同权入池（旧行为）。
+		Enabled bool `json:"enabled"`
+		// PromoteSuccesses 毕业所需累计成功次数（含入池探活那次），默认 3。
+		PromoteSuccesses int `json:"promote_successes"`
+		// CanaryInterval 搭车节流：观察池**整体**每该间隔最多吃一次真实请求
+		// （池级单闸，不是每号一闸——新号再多，对主池流量的总侵入有上界），
+		// 默认 "5m"。
+		CanaryInterval string `json:"canary_interval"`
+	} `json:"probation"`
 
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
@@ -159,6 +204,13 @@ type Config struct {
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// Quarantine* 解析后的隔离号池参数。
+	QuarantineProbeDelayDur    time.Duration `json:"-"`
+	QuarantineSilenceDur       time.Duration `json:"-"`
+	QuarantineSilenceMaxDur    time.Duration `json:"-"`
+	QuarantineProbeIntervalDur time.Duration `json:"-"`
+	// ProbationCanaryIntervalDur 解析后的观察池搭车节流窗口。
+	ProbationCanaryIntervalDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -204,6 +256,19 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 隔离号池默认（content moderation quarantine）：内容是恶性错误，threshold=1
+	// 一次即隔离；隔离到可探活等待 1m（不是惩罚）；探活失败续默 1h 起 ×2 封顶 24h；
+	// 探活 5m 一轮。默认开启。
+	c.Quarantine.Enabled = true
+	c.Quarantine.Threshold = 1
+	c.Quarantine.ProbeDelay = "1m"
+	c.Quarantine.Silence = "1h"
+	c.Quarantine.SilenceMax = "24h"
+	c.Quarantine.ProbeInterval = "5m"
+	// 新号观察池默认：毕业需 3 次成功；搭车节流 5m（池级单闸）。默认开启。
+	c.Probation.Enabled = true
+	c.Probation.PromoteSuccesses = 3
+	c.Probation.CanaryInterval = "5m"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -381,6 +446,44 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 隔离号池参数归一（空值回落默认；threshold 非正回落 1——内容是恶性错误）。
+	if c.Quarantine.ProbeDelay == "" {
+		c.Quarantine.ProbeDelay = "1m"
+	}
+	if c.Quarantine.Silence == "" {
+		c.Quarantine.Silence = "1h"
+	}
+	if c.Quarantine.SilenceMax == "" {
+		c.Quarantine.SilenceMax = "24h"
+	}
+	if c.Quarantine.ProbeInterval == "" {
+		c.Quarantine.ProbeInterval = "5m"
+	}
+	if c.Quarantine.Threshold <= 0 {
+		c.Quarantine.Threshold = 1
+	}
+	if c.QuarantineProbeDelayDur, err = time.ParseDuration(c.Quarantine.ProbeDelay); err != nil {
+		return fmt.Errorf("quarantine.probe_delay: %w", err)
+	}
+	if c.QuarantineSilenceDur, err = time.ParseDuration(c.Quarantine.Silence); err != nil {
+		return fmt.Errorf("quarantine.silence: %w", err)
+	}
+	if c.QuarantineSilenceMaxDur, err = time.ParseDuration(c.Quarantine.SilenceMax); err != nil {
+		return fmt.Errorf("quarantine.silence_max: %w", err)
+	}
+	if c.QuarantineProbeIntervalDur, err = time.ParseDuration(c.Quarantine.ProbeInterval); err != nil {
+		return fmt.Errorf("quarantine.probe_interval: %w", err)
+	}
+	// 新号观察池参数归一（空值回落默认；非正值回落默认）。
+	if c.Probation.CanaryInterval == "" {
+		c.Probation.CanaryInterval = "5m"
+	}
+	if c.Probation.PromoteSuccesses <= 0 {
+		c.Probation.PromoteSuccesses = 3
+	}
+	if c.ProbationCanaryIntervalDur, err = time.ParseDuration(c.Probation.CanaryInterval); err != nil {
+		return fmt.Errorf("probation.canary_interval: %w", err)
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

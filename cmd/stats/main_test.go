@@ -615,8 +615,8 @@ func TestValidateFlags(t *testing.T) {
 		t.Errorf("错误应点明冲突的选项，得到 %v", err)
 	}
 
-	// -sort：四个合法值全通过。
-	for _, k := range []string{"requests", "ttfb", "tokens", "credit"} {
+	// -sort：五个合法值全通过。
+	for _, k := range []string{"requests", "ttfb", "tokens", "credit", "credits"} {
 		if err := validateFlags(0, false, k); err != nil {
 			t.Errorf("-sort=%s 应通过，得到 %v", k, err)
 		}
@@ -712,6 +712,131 @@ func TestRewriteFrameEscapes(t *testing.T) {
 	first := captureStdout(t, func() { rewriteFrame(lines, 0, true) })
 	if strings.Contains(first, "[0A") {
 		t.Errorf("首帧不应包含上移转义，得到 %q", first)
+	}
+}
+
+// ─── 倍率列与 -sort credits（issue #176）──────────────────────────────────
+
+// TestSortModelsCredits -sort credits 的排序契约（C4）：
+//   - 倍率降序（x0.06 > x0.03 > x0.00）；
+//   - 缺失/不可解析（""）严格低于一切真实倍率（含 x0.00 免费模型）——
+//     「未知」排在「免费」之后，与展示侧 "-" 的语义一致；
+//   - 同倍率按模型名升序稳定排列。
+func TestSortModelsCredits(t *testing.T) {
+	rows := []modelStat{
+		{Model: "a", Credits: "x0.06"},
+		{Model: "b", Credits: "x0.03"},
+		{Model: "c", Credits: ""},
+		{Model: "d", Credits: "x0.00"},
+	}
+	sortModels(rows, "credits")
+	want := []string{"a", "b", "d", "c"}
+	for i, m := range rows {
+		if m.Model != want[i] {
+			t.Errorf("credits 排序第 %d 行 = %s, want %s（完整序：%v）", i, m.Model, want[i], rows)
+		}
+	}
+
+	// 同倍率（x0.06）按名升序。
+	tie := []modelStat{{Model: "zeta", Credits: "x0.06"}, {Model: "alpha", Credits: "x0.06"}}
+	sortModels(tie, "credits")
+	if tie[0].Model != "alpha" || tie[1].Model != "zeta" {
+		t.Errorf("同倍率应按名升序：%v", tie)
+	}
+
+	// 全缺失：哨兵 -1 平局 → 纯名升序（退化但确定）。
+	none := []modelStat{{Model: "b", Credits: ""}, {Model: "a", Credits: ""}}
+	sortModels(none, "credits")
+	if none[0].Model != "a" || none[1].Model != "b" {
+		t.Errorf("全缺失应按名升序：%v", none)
+	}
+}
+
+// TestCreditsRate creditsRate 的宽容解析（"x0.06 credits" 等上游形态）与
+// 哨兵 -1（缺失/不可解析/负数）。
+func TestCreditsRate(t *testing.T) {
+	cases := []struct {
+		in   string
+		want float64
+	}{
+		{"x0.06", 0.06},
+		{"x0.06 credits", 0.06},
+		{"x0.00", 0},
+		{"x1", 1},
+		{"", -1},
+		{"x", -1},
+		{"xabc", -1},
+		{"x-0.5", -1},
+		{"credits", -1},
+	}
+	for _, c := range cases {
+		if got := creditsRate(c.in); got != c.want {
+			t.Errorf("creditsRate(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestTableCreditsColumn 倍率列的渲染契约（C1/C2/C3）：
+//   - (a) 任一行有倍率 → 列出现，位置在扣费左侧；缺失行渲染 "-"，
+//     命中行渲染原文；
+//   - (b) 全表无倍率（旧网关 / 冷缓存）→ 列整体隐藏，布局与既有 9 列一致。
+func TestTableCreditsColumn(t *testing.T) {
+	// (a) 有倍率。
+	rich := mkModel("a", 10, 0)
+	rich.Credits = "x0.06"
+	plain := mkModel("b", 5, 0)
+	tbl := buildTable([]modelStat{rich, plain}, mkModel("(all)", 15, 0), "requests", 0, 0, testNow)
+
+	joined := strings.Join(tbl, "\n")
+	if !strings.Contains(joined, "倍率") {
+		t.Fatalf("有倍率时应出现倍率列:\n%s", joined)
+	}
+	if !strings.Contains(joined, "x0.06") {
+		t.Errorf("倍率命中行应渲染原文 x0.06:\n%s", joined)
+	}
+	// 倍率列的 | 位置必须紧跟扣费列左侧：header 行里 倍率 的显示列区间终点 +1
+	// 即为它与扣费之间的 |。
+	hdr := tbl[0]
+	bars := barColumns(hdr, '|')
+	ri := strings.Index(hdr, "倍率")
+	ki := strings.Index(hdr, "扣费")
+	if ri < 0 || ki < 0 {
+		t.Fatalf("表头缺 倍率/扣费：%q", hdr)
+	}
+	if ri >= ki {
+		t.Fatalf("倍率应在扣费左侧（倍率@%d 扣费@%d）：%q", ri, ki, hdr)
+	}
+	// 倍率列右边界（它右侧最近的 |）== 扣费列左边界（其左侧最近的 |）。
+	// byte 偏移须换算成显示列（CJK 占 2 列）才能与 barColumns 同口径比较。
+	riCol := displayWidth(hdr[:ri])
+	nextBar := -1
+	for _, b := range bars {
+		if b > riCol {
+			nextBar = b
+			break
+		}
+	}
+	kiCol := displayWidth(hdr[:ki])
+	prevBar := -1
+	for _, b := range bars {
+		if b < kiCol {
+			prevBar = b
+		}
+	}
+	if nextBar < 0 || nextBar != prevBar {
+		t.Errorf("倍率与扣费应相邻（倍率右界 |@%d，扣费左界 |@%d）：%q", nextBar, prevBar, hdr)
+	}
+
+	// (b) 全表无倍率 → 列隐藏，且列数（| 个数）与既有 9 列布局一致。
+	hidden := buildTable([]modelStat{mkModel("a", 10, 0)}, mkModel("(all)", 10, 0), "requests", 0, 0, testNow)
+	hj := strings.Join(hidden, "\n")
+	if strings.Contains(hj, "倍率") {
+		t.Errorf("全表无倍率时不应出现倍率列:\n%s", hj)
+	}
+	baseBars := strings.Count(hidden[0], "|")
+	richBars := strings.Count(tbl[0], "|")
+	if richBars != baseBars+1 {
+		t.Errorf("有倍率应恰好多一列（| %d → %d）", baseBars, richBars)
 	}
 }
 

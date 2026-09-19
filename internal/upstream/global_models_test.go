@@ -177,6 +177,54 @@ func TestFetchGlobalModelsNegativeCache(t *testing.T) {
 	}
 }
 
+// TestGlobalModelInfosSnapshotReadOnly 只读快照的三个契约（issue #176 T1）：
+//   - (a) 冷客户端（从未探测）→ 快照 nil，零上游请求（绝不主动探测）；
+//   - (b) 一次 FetchGlobalModelInfos 预热（v3 + /v2 并发两请求）→ 快照返回
+//     同一批全字段 infos（含 credits 原文）；
+//   - (c) 预热后反复读快照 → fake 请求计数不变（只读，与 Fetch* 的 miss 即探测
+//     语义相反——本方法服务 /v1/stats，缓存冷就冷，不发起网络）。
+func TestGlobalModelInfosSnapshotReadOnly(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	var calls []string
+	srv := globalModelsSrv(t, &calls, nil, func(path string) (int, string) {
+		return 200, `{"code":0,"data":{"models":[{"id":"hy3","name":"Hy3","credits":"x0.05"}]}}`
+	})
+	defer srv.Close()
+
+	c := globalModelsClient(t, srv)
+
+	// (a) 冷：快照 nil，零上游请求。
+	if got := c.GlobalModelInfosSnapshot(); got != nil {
+		t.Fatalf("cold snapshot = %+v, want nil", got)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("cold snapshot made %d upstream calls, want 0 (must not probe)", len(calls))
+	}
+
+	// (b) 预热：v3/config + /v2 企业路各一次 → 快照返回同批 infos。
+	infos := c.FetchGlobalModelInfos(globalAcct())
+	if len(infos) != 1 || infos[0].ID != "hy3" || infos[0].Credits != "x0.05" {
+		t.Fatalf("warm FetchGlobalModelInfos = %+v, want [{hy3 x0.05}]", infos)
+	}
+	snap := c.GlobalModelInfosSnapshot()
+	if len(snap) != 1 || snap[0].ID != "hy3" || snap[0].Credits != "x0.05" {
+		t.Fatalf("snapshot = %+v, want same infos as fetch", snap)
+	}
+	warmCalls := len(calls)
+
+	// (c) 只读：再读 N 次零新请求。
+	for i := 0; i < 5; i++ {
+		if got := c.GlobalModelInfosSnapshot(); got == nil || got[0].ID != "hy3" {
+			t.Fatalf("snapshot read #%d = %+v, want cached infos", i, got)
+		}
+	}
+	if len(calls) != warmCalls {
+		t.Errorf("snapshot reads made %d new upstream calls, want 0 (read-only)", len(calls)-warmCalls)
+	}
+}
+
 // TestFetchGlobalModelsParseNarrowTable 兼容窄表形态：data 直接是字符串数组。
 func TestFetchGlobalModelsParseNarrowTable(t *testing.T) {
 	auth.SetGlobalEnabled(true)

@@ -167,6 +167,11 @@ type ModelStatPayload struct {
 	Credit       float64 `json:"credit"`
 	CreditPerReq float64 `json:"credit_per_req"`
 
+	// Credits 上游积分倍率原文（如 "x0.06"），与 /v1/models 的 credits 同源同值；
+	// 目录未下发 / 缓存冷 → 空串，JSON 整体省略（缺失≠免费，不输出 "x0.00"）。
+	// 由 stats handler 从模型目录只读缓存合入（enrichCredits），不参与聚合。
+	Credits string `json:"credits,omitempty"`
+
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 }
 
@@ -272,6 +277,45 @@ func logMetricsCapWarn(model string) {
 	log.Printf("WARN: [metrics] 模型键达上限 %d，丢弃新键 model=%q（异常模型名？）", metricsCap, model)
 }
 
+// enrichCredits 把上游积分倍率原文合入 stats 快照（/v1/stats 数据展示侧增强）。
+//
+// 数据源与 /v1/models 完全同源：CN 侧 cachedModelsSnapshot / global 侧
+// GlobalModelInfosSnapshot，均为**只读快照**——缓存冷/过期 → nil，绝不发起上游
+// 调用（maintainer 约束：网关只加工已有数据）。倍率是展示字段而非观测值，故
+// 不进 recordChatMetric 聚合路径，快照出口统一合入。
+//
+// 键归一：stats 键是请求体 model 原文（含 realm 前缀），目录 id 是裸名——
+// resolveModel 剥前缀后按 realm 查表；未知前缀/裸名含冒号/"-" 查不到 → 省略。
+// total 行不参与（跨倍率聚合无意义）。
+func (h *Handler) enrichCredits(snap *MetricsSnapshot) {
+	cn := make(map[string]string) // bare id -> credits 原文
+	for _, mi := range cachedModelsSnapshot() {
+		if mi.Credits != "" {
+			cn[mi.ID] = mi.Credits
+		}
+	}
+	var global map[string]string
+	if h.cfg.Upstream != nil {
+		global = make(map[string]string)
+		for _, mi := range h.cfg.Upstream.GlobalModelInfosSnapshot() {
+			if mi.Credits != "" {
+				global[mi.ID] = mi.Credits
+			}
+		}
+	}
+	for i := range snap.Models {
+		realm, bare := resolveModel(snap.Models[i].Model)
+		if bare == "" || bare == "-" {
+			continue
+		}
+		if realm == "global" {
+			snap.Models[i].Credits = global[bare]
+		} else {
+			snap.Models[i].Credits = cn[bare]
+		}
+	}
+}
+
 // fillStatFromUsage 把非流式聚合响应的 usage 观测填进 chatStat（与流式路径同口径）。
 //
 // 与 usageCreditTotal 的分工：那个函数服务成本账本（只取 credit + 总 token），
@@ -302,8 +346,11 @@ func intFromUsage(u map[string]any, key string) int {
 }
 
 // stats 处理 GET /v1/stats：返回按模型聚合的请求统计（社区面板数据源）。
+// 聚合口径不变；出口处只读合入模型目录的积分倍率（enrichCredits，无上游调用）。
 func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, MetricsSnapshotOf())
+	snap := MetricsSnapshotOf()
+	h.enrichCredits(&snap)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // statsReset 处理 POST /v1/stats/reset：清空累计，便于观察增量。

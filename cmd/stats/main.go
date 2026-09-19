@@ -52,6 +52,7 @@ type modelStat struct {
 	CacheHitRate     float64 `json:"cache_hit_rate"`
 	Credit           float64 `json:"credit"`
 	CreditPerReq     float64 `json:"credit_per_req"`
+	Credits          string  `json:"credits"` // 上游倍率原文；旧版网关缺失 → ""（值类型零值兜底）
 	LastSeen         *string `json:"last_seen"`
 }
 
@@ -71,7 +72,7 @@ func main() {
 		jsonOut  = flag.Bool("json", false, "输出原始 JSON（供脚本消费），不做格式化")
 		watch    = flag.Duration("watch", 0, "原地刷新间隔（如 5s）；0 = 只取一次快照")
 		timeout  = flag.Duration("timeout", 15*time.Second, "HTTP 请求超时")
-		sortKey  = flag.String("sort", "requests", "按模型排序字段：requests|ttfb|tokens|credit")
+		sortKey  = flag.String("sort", "requests", "按模型排序字段：requests|ttfb|tokens|credit|credits")
 		width    = flag.Int("width", 0, "按指定列宽排版（0 = 自动探测终端宽度）")
 		height   = flag.Int("height", 0, "按指定行数排版（0 = 自动探测终端高度）")
 		altScr   = flag.Bool("alt-screen", false, "watch 用备用屏幕缓冲绘制（退出时还原原屏，推荐）")
@@ -146,9 +147,9 @@ func validateFlags(watch time.Duration, jsonOut bool, sortKey string) error {
 	// 用户以为按 ttfb 排了、实际按 requests，是「看不出错」的错误。
 	// 与 stats.ps1 的 [ValidateSet] 同口径（两个入口行为一致）。
 	switch sortKey {
-	case "requests", "ttfb", "tokens", "credit":
+	case "requests", "ttfb", "tokens", "credit", "credits":
 	default:
-		return fmt.Errorf("-sort 取值 %q 无效（可选：requests|ttfb|tokens|credit）", sortKey)
+		return fmt.Errorf("-sort 取值 %q 无效（可选：requests|ttfb|tokens|credit|credits）", sortKey)
 	}
 	return nil
 }
@@ -392,6 +393,22 @@ func columns(modelBudget int, now time.Time) []col {
 				return "-"
 			}
 			return fmt.Sprintf("%.1f%%", m.CacheHitRate*100)
+		}},
+		{head: "倍率", right: true, dropSeq: 10, value: func(m modelStat) string {
+			// 缺倍率（上游未下发 / 目录缓存冷）显示 "-"——与真实 x0.00 免费模型
+			// 视觉区分（issue #176：absent ≠ free）。
+			if m.Credits == "" {
+				return "-"
+			}
+			return m.Credits
+		}, show: func(rows []modelStat) bool {
+			// 全表无倍率（旧版网关 / 缓存冷）时整列隐藏，不摆一列 "-"。
+			for _, m := range rows {
+				if m.Credits != "" {
+					return true
+				}
+			}
+			return false
 		}},
 		{head: "扣费", right: true, dropSeq: 9, value: func(m modelStat) string {
 			return fmt.Sprintf("%.2f", m.Credit)
@@ -1152,6 +1169,8 @@ func sortModels(rows []modelStat, sortKey string) {
 		less = func(i, j int) bool { return rows[i].TotalTokens > rows[j].TotalTokens }
 	case "credit":
 		less = func(i, j int) bool { return rows[i].Credit > rows[j].Credit }
+	case "credits":
+		less = func(i, j int) bool { return creditsRate(rows[i].Credits) > creditsRate(rows[j].Credits) }
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if less(i, j) {
@@ -1162,6 +1181,22 @@ func sortModels(rows []modelStat, sortKey string) {
 		}
 		return rows[i].Model < rows[j].Model // 同值时按模型名稳定排列
 	})
+}
+
+// creditsRate 把倍率原文（"x0.06" / "x0.05 credits" 等上游形态）解析为浮点倍率，
+// 供 -sort credits 排序。缺失/不可解析返回 -1：排序上严格低于一切真实倍率
+// （含 x0.00 免费模型）——"未知"永远排在"免费"之后，与展示侧 "-" 的语义一致。
+func creditsRate(s string) float64 {
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "credits"))
+	s = strings.TrimSpace(strings.TrimPrefix(s, "x"))
+	if s == "" {
+		return -1
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 {
+		return -1
+	}
+	return v
 }
 
 // ─── 格式化辅助 ───────────────────────────────────────────────────────────
